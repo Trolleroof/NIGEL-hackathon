@@ -68,8 +68,22 @@ export default function ThreeScene({
       return;
     }
 
+    // Convert ROS coordinates (Z-up) to Three.js (Y-up)
+    // In ROS: X=forward, Y=left, Z=up
+    // In Three.js: X=right, Y=up, Z=forward
+    const convertedPositions = new Float32Array(data.pointCount * 3);
+    for (let i = 0; i < data.pointCount; i++) {
+      const rosX = data.positions[i * 3];
+      const rosY = data.positions[i * 3 + 1];
+      const rosZ = data.positions[i * 3 + 2];
+
+      convertedPositions[i * 3] = rosX;      // Three.js X = ROS X
+      convertedPositions[i * 3 + 1] = rosZ;  // Three.js Y = ROS Z
+      convertedPositions[i * 3 + 2] = -rosY; // Three.js Z = -ROS Y
+    }
+
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+    geometry.setAttribute('position', new THREE.BufferAttribute(convertedPositions, 3));
 
     const normalizedColors = new Float32Array(data.colors.length);
     for (let i = 0; i < data.colors.length; i += 1) {
@@ -85,8 +99,6 @@ export default function ThreeScene({
     });
 
     const pointCloud = new THREE.Points(geometry, material);
-    // Convert ROS Z-up coordinates to Three.js Y-up.
-    pointCloud.rotation.x = -Math.PI / 2;
     sceneRef.current.add(pointCloud);
     pointCloudRef.current = pointCloud;
 
@@ -110,7 +122,7 @@ export default function ThreeScene({
       timestamp: data.timestamp,
     });
 
-    // Create or update firefighter marker (a red cone pointing up)
+    // Create or update firefighter marker (an upright red cone)
     if (!firefighterMarkerRef.current) {
       const geometry = new THREE.ConeGeometry(0.2, 0.5, 8);
       const material = new THREE.MeshStandardMaterial({
@@ -120,37 +132,20 @@ export default function ThreeScene({
       });
       const cone = new THREE.Mesh(geometry, material);
 
-      // Add a glow ring at the base
-      const ringGeometry = new THREE.RingGeometry(0.2, 0.3, 16);
-      const ringMaterial = new THREE.MeshBasicMaterial({
-        color: 0xff3131,
-        side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.6,
-      });
-      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
-      ring.rotation.x = -Math.PI / 2;
-      ring.position.y = -0.25;
+      // Position cone so the tip is at the origin (bottom of cone at firefighter position)
+      cone.position.y = 0.25; // Half the cone height
 
       const markerGroup = new THREE.Group();
       markerGroup.add(cone);
-      markerGroup.add(ring);
-
-      // Convert ROS Z-up to Three.js Y-up
-      markerGroup.rotation.x = -Math.PI / 2;
 
       sceneRef.current.add(markerGroup);
       firefighterMarkerRef.current = markerGroup;
     }
 
-    // Update position (ROS coordinates)
-    firefighterMarkerRef.current.position.set(data.x, data.y, data.z);
-
-    // Update orientation (quaternion)
-    const markerQuaternion = new THREE.Quaternion(data.qx, data.qy, data.qz, data.qw);
-    // Apply the base rotation first, then the orientation
-    const baseRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
-    firefighterMarkerRef.current.quaternion.copy(markerQuaternion.multiply(baseRotation));
+    // Update position - convert ROS coordinates (Z-up) to Three.js (Y-up)
+    // In ROS: X=forward, Y=left, Z=up
+    // In Three.js: X=right, Y=up, Z=forward
+    firefighterMarkerRef.current.position.set(data.x, data.z, -data.y);
   }, [setCurrentPosition]);
 
   const handlePathData = useCallback((data: PathData) => {
@@ -175,16 +170,27 @@ export default function ThreeScene({
       });
       const line = new THREE.Line(geometry, material);
 
-      // Convert ROS Z-up to Three.js Y-up
-      line.rotation.x = -Math.PI / 2;
-
       sceneRef.current.add(line);
       breadcrumbLineRef.current = line;
     }
 
+    // Convert ROS coordinates (Z-up) to Three.js (Y-up) for breadcrumb positions
+    // In ROS: X=forward, Y=left, Z=up
+    // In Three.js: X=right, Y=up, Z=forward
+    const convertedPositions = new Float32Array(data.pointCount * 3);
+    for (let i = 0; i < data.pointCount; i++) {
+      const rosX = data.positions[i * 3];
+      const rosY = data.positions[i * 3 + 1];
+      const rosZ = data.positions[i * 3 + 2];
+
+      convertedPositions[i * 3] = rosX;      // Three.js X = ROS X
+      convertedPositions[i * 3 + 1] = rosZ;  // Three.js Y = ROS Z
+      convertedPositions[i * 3 + 2] = -rosY; // Three.js Z = -ROS Y
+    }
+
     // Update line geometry
     const geometry = breadcrumbLineRef.current.geometry;
-    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions.slice(), 3));
+    geometry.setAttribute('position', new THREE.BufferAttribute(convertedPositions, 3));
     geometry.setDrawRange(0, data.pointCount);
     geometry.attributes.position.needsUpdate = true;
     geometry.computeBoundingSphere();
@@ -341,9 +347,6 @@ export default function ThreeScene({
     const gridHelper = new THREE.GridHelper(10, 10, 0x444444, 0x222222);
     scene.add(gridHelper);
 
-    const axesHelper = new THREE.AxesHelper(5);
-    scene.add(axesHelper);
-
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
@@ -425,11 +428,13 @@ export default function ThreeScene({
         markerGroup.add(sphere);
         markerGroup.add(ring);
 
-        // Set position (ROS coordinates)
-        markerGroup.position.copy(waypoint.position);
-
-        // Convert ROS Z-up to Three.js Y-up
-        markerGroup.rotation.x = -Math.PI / 2;
+        // Convert ROS coordinates (Z-up) to Three.js (Y-up)
+        // Waypoint position is already a THREE.Vector3, so we need to transform it
+        markerGroup.position.set(
+          waypoint.position.x,   // Three.js X = ROS X
+          waypoint.position.z,   // Three.js Y = ROS Z
+          -waypoint.position.y   // Three.js Z = -ROS Y
+        );
 
         sceneRef.current.add(markerGroup);
         waypointMarkersRef.current.set(waypoint.id, markerGroup);
