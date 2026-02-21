@@ -6,31 +6,6 @@ import Link from 'next/link'
 const CW = 900
 const CH = 500
 
-// Building wall segments [x1,y1,x2,y2]
-const WALLS: [number, number, number, number][] = [
-  // Outer walls (with entry gap at bottom x=405-465)
-  [80, 50, 820, 50],
-  [80, 50, 80, 450],
-  [820, 50, 820, 450],
-  [80, 450, 405, 450],
-  [465, 450, 820, 450],
-  // Upper room dividers — vertical
-  [290, 50, 290, 135], [290, 180, 290, 210],  // left, door gap 135-180
-  [530, 50, 530, 135], [530, 180, 530, 210],  // right, door gap 135-180
-  // Horizontal wall separating upper rooms from corridor
-  [80, 210, 170, 210], [230, 210, 400, 210], [460, 210, 580, 210], // gaps at 170-230, 400-460
-  // Corridor → staging horizontal wall
-  [80, 340, 370, 340], [435, 340, 820, 340],  // gap at 370-435
-]
-
-const ROOM_LABELS = [
-  { x: 183, y: 130, label: 'ROOM A' },
-  { x: 410, y: 130, label: 'ROOM B' },
-  { x: 672, y: 130, label: 'ROOM C' },
-  { x: 400, y: 280, label: 'CORRIDOR' },
-  { x: 435, y: 400, label: 'STAGING' },
-]
-
 // ─── Types ──────────────────────────────────────────────────────────
 interface Pos { x: number; y: number }
 interface Msg { id: number; from: string; message: string; timestamp: string }
@@ -41,6 +16,28 @@ interface State {
   firefighterStatus: string
   breadcrumbs: Pos[]
 }
+
+type FeedKind = 'youtube' | 'live'
+
+interface CameraFeed {
+  id: string
+  label: string
+  kind: FeedKind
+  src?: string
+  note?: string
+}
+
+const YT_FALLBACK = 'https://www.youtube.com/embed/M7lc1UVf-VE?autoplay=1&mute=1&playsinline=1&rel=0'
+
+// Ordered row-major (2 columns x 3 rows). Slot 4 is row 2 / col 2.
+const CAMERA_FEEDS: CameraFeed[] = [
+  { id: 'FF1', label: 'UNIT FF1', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF2', label: 'UNIT FF2', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF3', label: 'UNIT FF3', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF4', label: 'RAW CAM', kind: 'live', note: 'LIVE INPUT' },
+  { id: 'FF5', label: 'UNIT FF5', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF6', label: 'UNIT FF6', kind: 'youtube', src: YT_FALLBACK },
+]
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 function statusColor(s: string) {
@@ -63,42 +60,8 @@ function drawMap(
   waypointPreview: Pos | null,
   tick: number,
 ) {
+  // Transparent clear — background is owned by Three.js
   ctx.clearRect(0, 0, CW, CH)
-
-  // Background
-  ctx.fillStyle = '#000'
-  ctx.fillRect(0, 0, CW, CH)
-
-  // Tactical dot grid
-  ctx.fillStyle = '#0f0f0f'
-  for (let x = 0; x < CW; x += 30) {
-    for (let y = 0; y < CH; y += 30) {
-      ctx.fillRect(x, y, 1, 1)
-    }
-  }
-
-  // Floor fill (inside building)
-  ctx.fillStyle = '#080808'
-  ctx.fillRect(81, 51, 738, 398)
-
-  // Walls
-  ctx.strokeStyle = '#4d1010'
-  ctx.lineWidth = 2
-  ctx.lineCap = 'square'
-  for (const [x1, y1, x2, y2] of WALLS) {
-    ctx.beginPath()
-    ctx.moveTo(x1, y1)
-    ctx.lineTo(x2, y2)
-    ctx.stroke()
-  }
-
-  // Room labels
-  ctx.font = '9px "Space Mono", monospace'
-  ctx.textAlign = 'center'
-  ctx.fillStyle = '#2a2a2a'
-  for (const { x, y, label } of ROOM_LABELS) {
-    ctx.fillText(label, x, y)
-  }
 
   // Breadcrumbs
   const crumbs = state.breadcrumbs
@@ -188,13 +151,17 @@ export default function DispatcherPage() {
   const [tick, setTick] = useState(0)
   const [time, setTime] = useState('')
   const [elapsed, setElapsed] = useState(0)
-  const startRef = useRef(Date.now())
+  const [expandedFeedId, setExpandedFeedId] = useState<string | null>(null)
+  const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
+  const [liveFeedError, setLiveFeedError] = useState<string | null>(null)
+  const [isCompactLayout, setIsCompactLayout] = useState(false)
+  const startRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
-  const stateRef = useRef(state)
-  stateRef.current = state
+  const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
 
   // Clock + tick
   useEffect(() => {
+    startRef.current = Date.now()
     const id = setInterval(() => {
       setTick(t => t + 1)
       setTime(new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }))
@@ -215,6 +182,49 @@ export default function DispatcherPage() {
     poll()
     const id = setInterval(poll, 300)
     return () => clearInterval(id)
+  }, [])
+
+  useEffect(() => {
+    let mounted = true
+    let stream: MediaStream | null = null
+
+    const initCamera = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setLiveFeedError('CAMERA API UNAVAILABLE')
+        return
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false,
+        })
+
+        if (!mounted) {
+          stream.getTracks().forEach(track => track.stop())
+          return
+        }
+
+        setLiveStream(stream)
+        setLiveFeedError(null)
+      } catch {
+        setLiveFeedError('CAMERA ACCESS BLOCKED')
+      }
+    }
+
+    initCamera()
+
+    return () => {
+      mounted = false
+      if (stream) stream.getTracks().forEach(track => track.stop())
+    }
+  }, [])
+
+  useEffect(() => {
+    const onResize = () => setIsCompactLayout(window.innerWidth < 1180)
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [])
 
   // Auto-scroll log
@@ -286,22 +296,28 @@ export default function DispatcherPage() {
 
       {/* ── Header ── */}
       <div style={{
-        height: '40px', borderBottom: '1px solid #1a1a1a',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '0 16px', flexShrink: 0,
+        height: isCompactLayout ? 'auto' : '40px',
+        borderBottom: '1px solid #1a1a1a',
+        display: 'flex',
+        alignItems: isCompactLayout ? 'stretch' : 'center',
+        justifyContent: 'space-between',
+        flexDirection: isCompactLayout ? 'column' : 'row',
+        gap: isCompactLayout ? '8px' : 0,
+        padding: isCompactLayout ? '8px 10px' : '0 16px',
+        flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '20px', width: isCompactLayout ? '100%' : 'auto' }}>
           <span className="font-display" style={{
             fontSize: '13px', fontWeight: 900, color: '#fff', letterSpacing: '0.12em',
           }}>
             FIRE<span style={{ color: '#ff3131' }}>COMMAND</span>
           </span>
           <span className="font-mono" style={{ fontSize: '9px', color: '#4d1010', letterSpacing: '0.2em' }}>
-            NIGEL // DISPATCHER
+            DISPATCHER
           </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '24px' }}>
-          <div style={{ display: 'flex', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '18px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
             <Stat label="TIME" value={time || '00:00:00'} />
             <Stat label="ELAPSED" value={fmtElapsed(elapsed)} accent />
             <Stat label="FF1" value={state.firefighterStatus}
@@ -320,34 +336,63 @@ export default function DispatcherPage() {
       {/* ── Body ── */}
       <div style={{
         flex: 1, display: 'grid',
-        gridTemplateColumns: '180px 1fr 240px',
-        gap: '8px', padding: '8px', overflow: 'hidden',
+        gridTemplateColumns: isCompactLayout ? '1fr' : '310px 1fr 240px',
+        gridTemplateRows: isCompactLayout ? 'minmax(330px, 42vh) minmax(280px, 36vh) minmax(220px, 1fr)' : '1fr',
+        gap: '8px',
+        padding: '8px',
+        overflow: isCompactLayout ? 'auto' : 'hidden',
       }}>
 
-        {/* Left: Units */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div className="panel-header">UNITS</div>
-          <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '10px', flex: 1 }}>
-            <UnitCard
-              id="FF1"
-              status={state.firefighterStatus}
-              pos={state.firefighterPosition}
-              waypoint={state.waypoint}
-              active
-            />
-            <UnitCard id="FF2" status="STANDBY" pos={null} waypoint={null} active={false} />
+        {/* Left: Camera Grid */}
+        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+          <div className="panel-header">MULTI-UNIT VIEWPORTS</div>
+          <div style={{
+            padding: '10px',
+            flex: 1,
+            display: 'grid',
+            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+            gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
+            gap: '8px',
+            minHeight: 0,
+          }}>
+            {CAMERA_FEEDS.map(feed => (
+              <FeedTile
+                key={feed.id}
+                feed={feed}
+                liveStream={liveStream}
+                liveFeedError={liveFeedError}
+                isExpanded={expandedFeedId === feed.id}
+                statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
+                onToggleExpand={setExpandedFeedId}
+              />
+            ))}
           </div>
           <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
             <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
-              CLICK MAP TO SET WAYPOINT
+              ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
             </div>
           </div>
         </div>
 
-        {/* Center: Map */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Center: Map
+          ─────────────────────────────────────────────────────────────────
+          TODO: THREE.JS INTEGRATION
+          Replace the ThreeJsPlaceholder div below with your Three.js canvas.
+
+          Expected ROS topics (via ROSbridge ws://ROS_HOST:9090):
+            Point cloud : /odin1/cloud_slam   (sensor_msgs/PointCloud2)
+            FF position : /odin1/odometry     (nav_msgs/Odometry)
+            Path trail  : /odin1/path         (nav_msgs/Path)
+            Floor plan  : /slam_cloud_accumulator/map (sensor_msgs/PointCloud2)
+
+          The waypoint overlay canvas MUST remain on top (z-index: 1) so
+          dispatcher click-to-waypoint keeps working after you swap in Three.js.
+          Set your Three.js renderer's domElement to position:absolute, inset:0.
+          ─────────────────────────────────────────────────────────────────
+        */}
+        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <div className="panel-header" style={{ justifyContent: 'space-between' }}>
-            <span>3D MAP + LOCATION</span>
+            <span>3D MAP // LOCATION</span>
             <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
               {state.waypoint
                 ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
@@ -355,11 +400,29 @@ export default function DispatcherPage() {
             </span>
           </div>
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+
+            {/* ── THREE.JS MOUNT POINT ──────────────────────────────────
+                Swap this div out for your <ThreeJsScene /> component.
+                It must be position:absolute, inset:0, z-index:0.
+            ─────────────────────────────────────────────────────────── */}
+            <ThreeJsPlaceholder />
+
+            {/* ── WAYPOINT OVERLAY ─────────────────────────────────────
+                This canvas stays on top. Do not remove it.
+                It handles click-to-waypoint and draws the FF dot + trail
+                until those are owned by the Three.js scene.
+            ─────────────────────────────────────────────────────────── */}
             <canvas
               ref={canvasRef}
               width={CW}
               height={CH}
-              style={{ width: '100%', height: '100%', cursor: 'crosshair', display: 'block' }}
+              style={{
+                position: 'absolute', inset: 0,
+                width: '100%', height: '100%',
+                cursor: 'crosshair', display: 'block',
+                zIndex: 1,
+                background: 'transparent',
+              }}
               onClick={handleCanvasClick}
               onMouseMove={handleCanvasMove}
               onMouseLeave={() => setWaypointPreview(null)}
@@ -368,7 +431,7 @@ export default function DispatcherPage() {
         </div>
 
         {/* Right: Radio Log */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <div className="panel-header">RADIO LOG</div>
           <div
             ref={logRef}
@@ -396,6 +459,76 @@ export default function DispatcherPage() {
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      {expandedFeed && (
+        <div
+          onClick={() => setExpandedFeedId(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.84)',
+            zIndex: 100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+          }}
+        >
+          <div
+            className="panel"
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 'min(1100px, 94vw)',
+              height: 'min(760px, 88vh)',
+              padding: '14px',
+              background: '#040404',
+            }}
+          >
+            <FeedTile
+              feed={expandedFeed}
+              liveStream={liveStream}
+              liveFeedError={liveFeedError}
+              isExpanded
+              statusText={expandedFeed.id === 'FF1' ? state.firefighterStatus : undefined}
+              onToggleExpand={() => setExpandedFeedId(null)}
+              lightbox
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Three.js placeholder ────────────────────────────────────────────
+// DELETE this entire component once Three.js is integrated.
+// Your <ThreeJsScene /> should be position:absolute, inset:0, z-index:0.
+function ThreeJsPlaceholder() {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 0,
+      background: '#050505',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      gap: '12px',
+    }}>
+      {/* Dot grid */}
+      <div className="tac-bg" style={{ position: 'absolute', inset: 0, opacity: 0.6 }} />
+
+      <div style={{ position: 'relative', textAlign: 'center' }}>
+        <div className="font-display" style={{
+          fontSize: '11px', fontWeight: 700, color: '#1a1a1a',
+          letterSpacing: '0.3em', marginBottom: '8px',
+        }}>
+          THREE.JS INTEGRATION POINT
+        </div>
+        <div className="font-mono" style={{ fontSize: '9px', color: '#111', letterSpacing: '0.15em', lineHeight: 1.8 }}>
+          /odin1/cloud_slam → PointCloud2<br />
+          /odin1/odometry → FF position<br />
+          /odin1/path → breadcrumb trail<br />
+          /slam_cloud_accumulator/map → floor map
         </div>
       </div>
     </div>
@@ -449,45 +582,165 @@ function HBtn({ onClick, label, dim }: { onClick: () => void; label: string; dim
   )
 }
 
-function UnitCard({ id, status, pos, waypoint, active }: {
-  id: string
-  status: string
-  pos: { x: number; y: number } | null
-  waypoint: { x: number; y: number } | null
-  active: boolean
+function FeedTile({
+  feed,
+  liveStream,
+  liveFeedError,
+  isExpanded,
+  statusText,
+  onToggleExpand,
+  lightbox,
+}: {
+  feed: CameraFeed
+  liveStream: MediaStream | null
+  liveFeedError: string | null
+  isExpanded: boolean
+  statusText?: string
+  onToggleExpand: (id: string | null) => void
+  lightbox?: boolean
 }) {
-  const dist = pos && waypoint
-    ? (Math.sqrt((waypoint.x - pos.x) ** 2 + (waypoint.y - pos.y) ** 2) * 0.055).toFixed(1)
-    : null
-
   return (
     <div style={{
-      border: `1px solid ${active ? '#2a2a2a' : '#111'}`,
-      padding: '10px',
-      position: 'relative',
+      border: '1px solid #1a1a1a',
+      background: '#030303',
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+      minHeight: 0,
     }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-        <span className="font-display" style={{ fontSize: '11px', fontWeight: 700, color: active ? '#fff' : '#333' }}>
-          {id}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '6px 7px',
+        borderBottom: '1px solid #1a1a1a',
+      }}>
+        <span className="font-display" style={{
+          fontSize: lightbox ? '11px' : '9px',
+          color: '#fff',
+          letterSpacing: '0.08em',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}>
+          {feed.label}
         </span>
-        <span style={{
-          width: '7px', height: '7px', borderRadius: '50%',
-          background: active ? statusColor(status) : '#222',
-          boxShadow: active ? `0 0 6px ${statusColor(status)}` : 'none',
-          animation: active && status !== 'OK' ? 'pulse-dot 1.5s infinite' : 'none',
-        }} />
+        <button
+          className="font-mono"
+          onClick={() => onToggleExpand(isExpanded ? null : feed.id)}
+          style={{
+            border: '1px solid #2a2a2a',
+            background: 'none',
+            color: '#a0a0a0',
+            fontSize: lightbox ? '8px' : '7px',
+            cursor: 'pointer',
+            letterSpacing: '0.08em',
+            padding: lightbox ? '5px 8px' : '3px 5px',
+            fontFamily: 'inherit',
+            flexShrink: 0,
+          }}
+        >
+          {isExpanded ? 'SHRINK' : 'EXPAND'}
+        </button>
       </div>
-      <div className="font-mono" style={{ fontSize: '9px', color: active ? statusColor(status) : '#333', marginBottom: '4px' }}>
-        {active ? status.toUpperCase() : 'STANDBY'}
+
+      <div className="scanlines" style={{ flex: 1, minHeight: 0, position: 'relative', background: '#000' }}>
+        <FeedViewport feed={feed} liveStream={liveStream} liveFeedError={liveFeedError} />
       </div>
-      {dist && (
-        <div className="font-mono" style={{ fontSize: '8px', color: '#666' }}>
-          {dist}m to target
-        </div>
-      )}
-      {!active && (
-        <div className="font-mono" style={{ fontSize: '8px', color: '#222' }}>NOT DEPLOYED</div>
-      )}
+
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderTop: '1px solid #1a1a1a',
+        padding: lightbox ? '6px 8px' : '4px 6px',
+      }}>
+        <span className="font-mono" style={{
+          fontSize: lightbox ? '8px' : '7px',
+          color: feed.kind === 'live' ? '#ff3131' : '#666',
+          letterSpacing: '0.08em',
+        }}>
+          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'YOUTUBE FEED'}
+        </span>
+        {statusText && (
+          <span className="font-mono" style={{
+            fontSize: lightbox ? '8px' : '7px',
+            color: statusColor(statusText),
+            letterSpacing: '0.08em',
+          }}>
+            {statusText.toUpperCase()}
+          </span>
+        )}
+      </div>
     </div>
+  )
+}
+
+function FeedViewport({
+  feed,
+  liveStream,
+  liveFeedError,
+}: {
+  feed: CameraFeed
+  liveStream: MediaStream | null
+  liveFeedError: string | null
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const el = videoRef.current
+    if (!el || feed.kind !== 'live') return
+    if (liveStream) {
+      el.srcObject = liveStream
+      void el.play().catch(() => {})
+      return
+    }
+    el.srcObject = null
+  }, [feed.kind, liveStream])
+
+  if (feed.kind === 'live') {
+    return (
+      <>
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        />
+        {!liveStream && (
+          <div style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'grid',
+            placeItems: 'center',
+            background: 'rgba(0,0,0,0.7)',
+            padding: '8px',
+          }}>
+            <span className="font-mono" style={{
+              color: '#666',
+              fontSize: '8px',
+              letterSpacing: '0.12em',
+              textAlign: 'center',
+              lineHeight: 1.6,
+            }}>
+              {liveFeedError ?? 'INITIALIZING CAMERA'}
+            </span>
+          </div>
+        )}
+      </>
+    )
+  }
+
+  return (
+    <iframe
+      src={feed.src ?? YT_FALLBACK}
+      title={`${feed.id} video feed`}
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      referrerPolicy="strict-origin-when-cross-origin"
+      allowFullScreen
+      style={{ width: '100%', height: '100%', border: 0, display: 'block' }}
+    />
   )
 }

@@ -37,12 +37,7 @@ export default function Home() {
         }}>
           FIRE<span style={{ color: '#ff3131' }}>COMMAND</span>
         </h1>
-        <div className="font-display" style={{
-          fontSize: '13px', fontWeight: 500, color: '#ff3131',
-          letterSpacing: '0.6em', marginTop: '14px',
-        }}>
-          NIGEL
-        </div>
+  
         <div className="font-mono" style={{
           fontSize: '11px', color: '#333', marginTop: '20px', letterSpacing: '0.15em',
         }}>

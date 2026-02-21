@@ -1,4 +1,4 @@
-# FireCommand: Tactical UI Styling Specifications
+# NIGEL: Navigation, Incident Guidance, and Emergency Localization & Control
 
 ## 1. Visual Identity & Vibe
 * [cite_start]**Theme Name:** Cyber-Noir Tactical Intelligence. [cite: 6]
