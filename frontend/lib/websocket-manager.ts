@@ -12,6 +12,8 @@ export interface PointCloudData {
   timestamp: number;
 }
 
+type BinaryFrameType = 'PTCL' | 'IMAG' | 'ODOM' | 'PATH' | 'UNKNOWN';
+
 export interface WebSocketManagerConfig {
   host: string;
   port: number;
@@ -108,14 +110,15 @@ export class WebSocketManager {
   /**
    * Handle WebSocket message event
    */
-  private handleMessage(event: MessageEvent): void {
-    if (!(event.data instanceof ArrayBuffer)) {
-      console.warn('Received non-binary message, ignoring');
-      return;
-    }
+  private async handleMessage(event: MessageEvent): Promise<void> {
+    const buffer = await this.toArrayBuffer(event.data);
+    if (!buffer) return;
+
+    const frameType = this.getBinaryFrameType(buffer);
+    if (frameType !== 'PTCL') return;
 
     try {
-      const pointCloudData = this.parsePointCloudMessage(event.data);
+      const pointCloudData = this.parsePointCloudMessage(buffer);
       this.config.onMessage(pointCloudData);
     } catch (error) {
       console.error('Failed to parse point cloud message:', error);
@@ -174,18 +177,48 @@ export class WebSocketManager {
     }
   }
 
+  private async toArrayBuffer(payload: unknown): Promise<ArrayBuffer | null> {
+    if (payload instanceof ArrayBuffer) return payload;
+
+    if (typeof Blob !== 'undefined' && payload instanceof Blob) {
+      return payload.arrayBuffer();
+    }
+
+    if (typeof payload === 'string') {
+      return null;
+    }
+
+    return null;
+  }
+
+  private getBinaryFrameType(buffer: ArrayBuffer): BinaryFrameType {
+    if (buffer.byteLength < 4) return 'UNKNOWN';
+
+    const view = new DataView(buffer);
+    const magic = String.fromCharCode(
+      view.getUint8(0),
+      view.getUint8(1),
+      view.getUint8(2),
+      view.getUint8(3),
+    );
+
+    if (magic === 'PTCL' || magic === 'IMAG' || magic === 'ODOM' || magic === 'PATH') {
+      return magic;
+    }
+
+    return 'UNKNOWN';
+  }
+
   /**
    * Parse binary point cloud message with 'PTCL' format
    *
    * Format:
    * [0..3]         char[4]    'PTCL' (magic bytes)
    * [4..7]         uint32     Point count N
-   * [8..8+N*12)    float32[]  XYZ positions (x0,y0,z0, x1,y1,z1, ...)
-   * [8+N*12..)     uint8[]    RGB colors (r0,g0,b0, r1,g1,b1, ...)
-   */
+  * [8..8+N*12)    float32[]  XYZ positions (x0,y0,z0, x1,y1,z1, ...)
+  * [8+N*12..)     uint8[]    RGB colors (r0,g0,b0, r1,g1,b1, ...)
+  */
   private parsePointCloudMessage(buffer: ArrayBuffer): PointCloudData {
-    console.log('Parsing point cloud message, buffer size:', buffer.byteLength);
-
     const view = new DataView(buffer);
 
     // Verify magic bytes 'PTCL'
@@ -196,30 +229,18 @@ export class WebSocketManager {
       view.getUint8(3)
     );
 
-    console.log('Magic bytes:', magic);
-
     if (magic !== 'PTCL') {
       throw new Error(`Invalid magic bytes: expected 'PTCL', got '${magic}'`);
     }
 
     // Read point count
     const pointCount = view.getUint32(4, true); // little-endian
-    console.log('Point count:', pointCount);
 
     // Calculate offsets
     const positionsOffset = 8;
     const positionsSize = pointCount * 12; // 3 floats (xyz) * 4 bytes
     const colorsOffset = positionsOffset + positionsSize;
     const colorsSize = pointCount * 3; // 3 bytes (rgb)
-
-    console.log('Data layout:', {
-      positionsOffset,
-      positionsSize,
-      colorsOffset,
-      colorsSize,
-      expectedTotalSize: colorsOffset + colorsSize,
-      actualBufferSize: buffer.byteLength,
-    });
 
     // Validate buffer size
     const expectedSize = colorsOffset + colorsSize;
@@ -242,13 +263,6 @@ export class WebSocketManager {
       colorsOffset,
       pointCount * 3
     );
-
-    console.log('Parsed data:', {
-      positionsLength: positions.length,
-      colorsLength: colors.length,
-      firstPosition: [positions[0], positions[1], positions[2]],
-      firstColor: [colors[0], colors[1], colors[2]],
-    });
 
     return {
       pointCount,

@@ -49,7 +49,6 @@ export default function Home() {
         {[
           { href: '/dispatcher', label: 'DISPATCHER', sub: 'COMMAND CENTER', note: 'LAPTOP' },
           { href: '/firefighter', label: 'FIREFIGHTER', sub: 'UNIT FF1', note: 'PHONE / TABLET' },
-          { href: '/threejs-cloud', label: 'THREE.JS CLOUD', sub: 'POINT MAP', note: 'ORBIT + WAYPOINT' },
         ].map(({ href, label, sub, note }) => (
           <Link key={href} href={href} style={{ textDecoration: 'none' }}>
             <div className="panel" style={{

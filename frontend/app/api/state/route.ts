@@ -1,13 +1,24 @@
 import { NextResponse } from 'next/server'
 
 interface Position { x: number; y: number }
-interface RadioMessage { id: number; from: string; message: string; timestamp: string }
+interface RadioMessage { id: number; from: string; message: string; timestamp: string; severity?: 'normal' | 'warning' | 'critical' }
+interface Hazard { id: string; position: Position; type: 'fire' | 'smoke' | 'collapse' | 'chemical' | 'other'; label: string; active: boolean }
+interface Task { id: string; description: string; priority: 'low' | 'medium' | 'high'; completed: boolean; createdAt: string }
+interface Alert { id: string; message: string; level: 'info' | 'warning' | 'critical'; acknowledged: boolean; createdAt: string }
+
 interface NigelState {
   firefighterPosition: Position
   waypoint: Position | null
   radioLog: RadioMessage[]
   firefighterStatus: string
   breadcrumbs: Position[]
+  hazards: Hazard[]
+  tasks: Task[]
+  alerts: Alert[]
+  airSupply: number
+  roomsCleared: string[]
+  missionStartTime: string
+  agentProcessing: boolean
 }
 
 declare global {
@@ -20,8 +31,8 @@ function ts() {
   })
 }
 
-if (!global._nigelState) {
-  global._nigelState = {
+function initState(): NigelState {
+  return {
     firefighterPosition: { x: 435, y: 400 },
     waypoint: null,
     radioLog: [
@@ -30,7 +41,22 @@ if (!global._nigelState) {
     ],
     firefighterStatus: 'OK',
     breadcrumbs: [],
+    hazards: [],
+    tasks: [],
+    alerts: [],
+    airSupply: 100,
+    roomsCleared: [],
+    missionStartTime: new Date().toISOString(),
+    agentProcessing: false,
   }
+}
+
+if (!global._nigelState) {
+  global._nigelState = initState()
+}
+
+function trimLog(state: NigelState) {
+  if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
 }
 
 export async function GET() {
@@ -49,13 +75,13 @@ export async function POST(request: Request) {
         message: 'Waypoint placed. Proceed to target.',
         timestamp: ts(),
       })
-      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      trimLog(state)
       break
 
     case 'dispatcher_clears_waypoint':
       state.waypoint = null
       state.radioLog.push({ id: Date.now(), from: 'DISPATCH', message: 'Waypoint cleared.', timestamp: ts() })
-      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      trimLog(state)
       break
 
     case 'firefighter_position_update':
@@ -73,7 +99,7 @@ export async function POST(request: Request) {
         message: `STATUS: ${(body.status as string).toUpperCase()}`,
         timestamp: ts(),
       })
-      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      trimLog(state)
       break
 
     case 'firefighter_voice_message':
@@ -82,7 +108,7 @@ export async function POST(request: Request) {
         message: body.message,
         timestamp: ts(),
       })
-      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      trimLog(state)
       break
 
     case 'dispatcher_voice_message':
@@ -92,17 +118,78 @@ export async function POST(request: Request) {
         message: body.message,
         timestamp: ts(),
       })
-      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      trimLog(state)
+      break
+
+    // ── Agent action types ──
+    case 'agent_add_hazard':
+      state.hazards.push({
+        id: body.hazard?.id ?? `haz-${Date.now()}`,
+        position: body.hazard?.position ?? state.firefighterPosition,
+        type: body.hazard?.type ?? 'other',
+        label: body.hazard?.label ?? 'Unknown hazard',
+        active: true,
+      })
+      break
+
+    case 'agent_add_task':
+      state.tasks.push({
+        id: body.task?.id ?? `task-${Date.now()}`,
+        description: body.task?.description ?? '',
+        priority: body.task?.priority ?? 'medium',
+        completed: false,
+        createdAt: new Date().toISOString(),
+      })
+      break
+
+    case 'agent_complete_task': {
+      const task = state.tasks.find(t => t.id === body.taskId)
+      if (task) task.completed = true
+      break
+    }
+
+    case 'agent_add_alert':
+      state.alerts.push({
+        id: body.alert?.id ?? `alert-${Date.now()}`,
+        message: body.alert?.message ?? '',
+        level: body.alert?.level ?? 'info',
+        acknowledged: false,
+        createdAt: new Date().toISOString(),
+      })
+      break
+
+    case 'agent_acknowledge_alert': {
+      const alert = state.alerts.find(a => a.id === body.alertId)
+      if (alert) alert.acknowledged = true
+      break
+    }
+
+    case 'agent_update_air_supply':
+      state.airSupply = Math.max(0, Math.min(100, body.airSupply ?? state.airSupply))
+      break
+
+    case 'agent_clear_room':
+      if (body.room && !state.roomsCleared.includes(body.room)) {
+        state.roomsCleared.push(body.room)
+      }
+      break
+
+    case 'agent_set_processing':
+      state.agentProcessing = !!body.processing
+      break
+
+    case 'agent_radio_message':
+      state.radioLog.push({
+        id: Date.now(), from: 'NIGEL',
+        message: body.message,
+        timestamp: ts(),
+        severity: body.severity ?? 'normal',
+      })
+      trimLog(state)
       break
 
     case 'reset':
-      global._nigelState = {
-        firefighterPosition: { x: 435, y: 400 },
-        waypoint: null,
-        radioLog: [{ id: Date.now(), from: 'SYSTEM', message: 'System reset.', timestamp: ts() }],
-        firefighterStatus: 'OK',
-        breadcrumbs: [],
-      }
+      global._nigelState = initState()
       break
   }
 

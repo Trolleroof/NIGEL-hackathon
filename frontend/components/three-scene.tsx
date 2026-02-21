@@ -29,24 +29,6 @@ export default function ThreeScene({
   const [pointCount, setPointCount] = useState<number>(0);
   const [lastUpdateTime, setLastUpdateTime] = useState<number>(0);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    // Initialize Three.js scene
-    initScene();
-
-    // Initialize WebSocket connection
-    initWebSocket();
-
-    // Start animation loop
-    animate();
-
-    // Cleanup on unmount
-    return () => {
-      cleanup();
-    };
-  }, [wsHost, wsPort]);
-
   /**
    * Initialize Three.js scene, camera, renderer, and controls
    */
@@ -147,18 +129,7 @@ export default function ThreeScene({
    * Handle incoming point cloud data from WebSocket
    */
   const handlePointCloudData = (data: PointCloudData) => {
-    if (!sceneRef.current) {
-      console.error('Scene not initialized');
-      return;
-    }
-
-    console.log('Received point cloud data:', {
-      pointCount: data.pointCount,
-      positionsLength: data.positions.length,
-      colorsLength: data.colors.length,
-      samplePosition: data.positions.slice(0, 9), // First 3 points (x,y,z each)
-      sampleColor: data.colors.slice(0, 9), // First 3 colors (r,g,b each)
-    });
+    if (!sceneRef.current) return;
 
     // Remove old point cloud if it exists
     if (pointCloudRef.current) {
@@ -173,7 +144,6 @@ export default function ThreeScene({
 
     // Validate data
     if (data.pointCount === 0) {
-      console.warn('Received empty point cloud');
       setPointCount(0);
       return;
     }
@@ -199,31 +169,14 @@ export default function ThreeScene({
       new THREE.BufferAttribute(normalizedColors, 3)
     );
 
-    // Compute bounding sphere and box for proper frustum culling and camera positioning
+    // Compute bounding sphere for frustum culling
     geometry.computeBoundingSphere();
-    geometry.computeBoundingBox();
 
-    // Log bounding information for debugging
-    if (geometry.boundingBox && geometry.boundingSphere) {
-      console.log('Point cloud bounds:', {
-        box: {
-          min: geometry.boundingBox.min,
-          max: geometry.boundingBox.max,
-        },
-        sphere: {
-          center: geometry.boundingSphere.center,
-          radius: geometry.boundingSphere.radius,
-        },
-      });
-    }
-
-    // Create point cloud material with larger, more visible points
+    // Keep point size conservative so the cloud shape remains legible.
     const material = new THREE.PointsMaterial({
-      size: 0.1, // Increased from 0.05 for better visibility
+      size: 0.05,
       vertexColors: true,
       sizeAttenuation: true,
-      transparent: false,
-      opacity: 1.0,
     });
 
     // Create point cloud mesh
@@ -231,31 +184,9 @@ export default function ThreeScene({
     sceneRef.current.add(pointCloud);
     pointCloudRef.current = pointCloud;
 
-    // Auto-adjust camera to look at point cloud center
-    if (geometry.boundingSphere && cameraRef.current && controlsRef.current) {
-      const center = geometry.boundingSphere.center;
-      const radius = geometry.boundingSphere.radius;
-
-      console.log('Adjusting camera to point cloud:', { center, radius });
-
-      // Position camera at a good distance to see the whole point cloud
-      const distance = radius * 2.5;
-      cameraRef.current.position.set(
-        center.x + distance,
-        center.y + distance,
-        center.z + distance
-      );
-
-      // Point camera at center
-      controlsRef.current.target.set(center.x, center.y, center.z);
-      controlsRef.current.update();
-    }
-
     // Update stats
     setPointCount(data.pointCount);
     setLastUpdateTime(data.timestamp);
-
-    console.log('Point cloud rendered successfully');
   };
 
   /**
@@ -308,6 +239,26 @@ export default function ThreeScene({
       controlsRef.current.dispose();
     }
   };
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    // Initialize Three.js scene
+    initScene();
+
+    // Initialize WebSocket connection
+    initWebSocket();
+
+    // Start animation loop
+    animate();
+
+    // Cleanup on unmount
+    return () => {
+      cleanup();
+    };
+    // initWebSocket and animate intentionally run once per wsHost/wsPort session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsHost, wsPort]);
 
   /**
    * Get status indicator color

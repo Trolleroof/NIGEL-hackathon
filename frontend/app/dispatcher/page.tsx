@@ -640,16 +640,6 @@ export default function DispatcherPage() {
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
           </div>
-          <Link href="/threejs-cloud" className="font-mono" style={{
-            textDecoration: 'none',
-            border: '1px solid #2a2a2a',
-            color: '#ff3131',
-            padding: '5px 9px',
-            fontSize: '8px',
-            letterSpacing: '0.1em',
-          }}>
-            THREE.JS CLOUD
-          </Link>
           <Link href="/" aria-label="Home" style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             color: '#333', textDecoration: 'none', width: 28, height: 28,
@@ -752,25 +742,13 @@ export default function DispatcherPage() {
         <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <div className="panel-header" style={{ justifyContent: 'space-between' }}>
             <span>Map</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
-                {dragWaypoint
-                  ? 'DRAGGING WAYPOINT'
-                  : state.waypoint
-                    ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
-                    : 'NO WAYPOINT'}
-              </span>
-              <Link href="/threejs-cloud" className="font-mono" style={{
-                textDecoration: 'none',
-                border: '1px solid #2a2a2a',
-                color: '#ff3131',
-                fontSize: '7px',
-                letterSpacing: '0.08em',
-                padding: '3px 6px',
-              }}>
-                OPEN THREE.JS
-              </Link>
-            </div>
+            <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
+              {dragWaypoint
+                ? 'DRAGGING WAYPOINT'
+                : state.waypoint
+                  ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
+                  : 'NO WAYPOINT'}
+            </span>
           </div>
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
 
