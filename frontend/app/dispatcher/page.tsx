@@ -1,14 +1,25 @@
 'use client'
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import ThreeScene from '@/components/three-scene'
 
 // ─── Canvas constants ───────────────────────────────────────────────
 const CW = 900
 const CH = 500
-const RIGHT_PANEL_WIDTH = 240
+const DEFAULT_RIGHT_PANEL_WIDTH = 240
+const DEFAULT_LEFT_PANEL_WIDTH = 310
 const MIN_LEFT_PANEL_WIDTH = 280
+const MIN_RIGHT_PANEL_WIDTH = 220
 const MIN_CENTER_PANEL_WIDTH = 460
+
+const RADIO_FILTERS = ['ALL', 'DISPATCH', 'FF1', 'SYSTEM'] as const
+type RadioFilter = (typeof RADIO_FILTERS)[number]
+
+const QUICK_RADIO_MACROS = [
+  'FF1 status check. Confirm location and air.',
+  'Copy. Hold position and report conditions.',
+  'Evacuate current room and move to staging now.',
+]
 
 // ─── Types ──────────────────────────────────────────────────────────
 interface Pos { x: number; y: number }
@@ -55,11 +66,19 @@ function fromColor(from: string) {
   return '#a0a0a0'
 }
 
+function classifyRadioSeverity(message: string) {
+  const normalized = message.toLowerCase()
+  if (/mayday|collapse|bomb|trapped|man down|evacuate now|flashover/.test(normalized)) return 'critical'
+  if (/smoke|low air|heat|injur|lost|help|victim/.test(normalized)) return 'warning'
+  return 'normal'
+}
+
 // ─── Canvas draw ─────────────────────────────────────────────────────
 function drawMap(
   ctx: CanvasRenderingContext2D,
   state: State,
   waypointPreview: Pos | null,
+  dragWaypoint: Pos | null,
   tick: number,
 ) {
   // Transparent clear — background is owned by Three.js
@@ -91,8 +110,9 @@ function drawMap(
   }
 
   // Waypoint
-  if (state.waypoint) {
-    const { x, y } = state.waypoint
+  const activeWaypoint = dragWaypoint ?? state.waypoint
+  if (activeWaypoint) {
+    const { x, y } = activeWaypoint
     const pulse = 0.6 + 0.4 * Math.sin(tick * 0.08)
     ctx.strokeStyle = `rgba(255,49,49,${pulse})`
     ctx.lineWidth = 1.5
@@ -150,32 +170,56 @@ export default function DispatcherPage() {
     waypoint: null, radioLog: [], firefighterStatus: 'OK', breadcrumbs: [],
   })
   const [waypointPreview, setWaypointPreview] = useState<Pos | null>(null)
+  const [dragWaypoint, setDragWaypoint] = useState<Pos | null>(null)
+  const [isDraggingWaypoint, setIsDraggingWaypoint] = useState(false)
+  const [canvasCursor, setCanvasCursor] = useState<'crosshair' | 'grab' | 'grabbing'>('crosshair')
   const [tick, setTick] = useState(0)
   const [time, setTime] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [expandedFeedId, setExpandedFeedId] = useState<string | null>(null)
+  const [expandedFeedSeekTime, setExpandedFeedSeekTime] = useState(0)
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
   const [liveFeedError, setLiveFeedError] = useState<string | null>(null)
   const [isCompactLayout, setIsCompactLayout] = useState(false)
-  const [leftPanelWidth, setLeftPanelWidth] = useState(310)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH)
+  const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH)
   const [isResizingFeeds, setIsResizingFeeds] = useState(false)
+  const [isResizingRadio, setIsResizingRadio] = useState(false)
+  const [radioFilter, setRadioFilter] = useState<RadioFilter>('ALL')
+  const [radioDraft, setRadioDraft] = useState('')
+  const [radioAutoFollow, setRadioAutoFollow] = useState(true)
   const startRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null)
+  const radioResizeStartRef = useRef<{ x: number; width: number } | null>(null)
+  const lastSeenRadioCountRef = useRef(0)
+  const skipCanvasClickRef = useRef(false)
+  const dragWaypointRef = useRef<Pos | null>(null)
+  const isDraggingWaypointRef = useRef(false)
   const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
 
   const clampLeftPanelWidth = useCallback((nextWidth: number) => {
     if (typeof window === 'undefined') return nextWidth
     const maxWidth = Math.max(
       MIN_LEFT_PANEL_WIDTH,
-      window.innerWidth - RIGHT_PANEL_WIDTH - MIN_CENTER_PANEL_WIDTH - 36,
+      window.innerWidth - rightPanelWidth - MIN_CENTER_PANEL_WIDTH - 36,
     )
     return Math.min(Math.max(nextWidth, MIN_LEFT_PANEL_WIDTH), maxWidth)
-  }, [])
+  }, [rightPanelWidth])
+
+  const clampRightPanelWidth = useCallback((nextWidth: number) => {
+    if (typeof window === 'undefined') return nextWidth
+    const maxWidth = Math.max(
+      MIN_RIGHT_PANEL_WIDTH,
+      window.innerWidth - leftPanelWidth - MIN_CENTER_PANEL_WIDTH - 36,
+    )
+    return Math.min(Math.max(nextWidth, MIN_RIGHT_PANEL_WIDTH), maxWidth)
+  }, [leftPanelWidth])
 
   // ── Speech-to-Text state ──
   const [isRecording, setIsRecording] = useState(false)
   const [interimText, setInterimText] = useState('')
+  const [finalTranscriptText, setFinalTranscriptText] = useState('')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
@@ -245,11 +289,12 @@ export default function DispatcherPage() {
     const onResize = () => {
       setIsCompactLayout(window.innerWidth < 1180)
       setLeftPanelWidth(prev => clampLeftPanelWidth(prev))
+      setRightPanelWidth(prev => clampRightPanelWidth(prev))
     }
     onResize()
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [clampLeftPanelWidth])
+  }, [clampLeftPanelWidth, clampRightPanelWidth])
 
   const startResizingFeeds = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
     if (isCompactLayout) return
@@ -257,6 +302,13 @@ export default function DispatcherPage() {
     setIsResizingFeeds(true)
     e.preventDefault()
   }, [isCompactLayout, leftPanelWidth])
+
+  const startResizingRadio = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    if (isCompactLayout) return
+    radioResizeStartRef.current = { x: e.clientX, width: rightPanelWidth }
+    setIsResizingRadio(true)
+    e.preventDefault()
+  }, [isCompactLayout, rightPanelWidth])
 
   useEffect(() => {
     if (!isResizingFeeds) return
@@ -286,12 +338,63 @@ export default function DispatcherPage() {
     }
   }, [isResizingFeeds, clampLeftPanelWidth])
 
-  // Auto-scroll log
   useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight
+    if (!isResizingRadio) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      const start = radioResizeStartRef.current
+      if (!start) return
+      const resized = start.width + (start.x - e.clientX)
+      setRightPanelWidth(clampRightPanelWidth(resized))
     }
-  }, [state.radioLog.length])
+
+    const onMouseUp = () => {
+      setIsResizingRadio(false)
+      radioResizeStartRef.current = null
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingRadio, clampRightPanelWidth])
+
+  const filteredRadioLog = useMemo(() => (
+    state.radioLog.filter(msg => radioFilter === 'ALL' || msg.from === radioFilter)
+  ), [state.radioLog, radioFilter])
+
+  const criticalRadioCount = useMemo(() => (
+    filteredRadioLog.reduce((count, msg) => (
+      classifyRadioSeverity(msg.message) === 'critical' ? count + 1 : count
+    ), 0)
+  ), [filteredRadioLog])
+
+  const scrollRadioToLatest = useCallback(() => {
+    const node = logRef.current
+    if (!node) return
+    node.scrollTop = node.scrollHeight
+  }, [])
+
+  useEffect(() => {
+    if (!radioAutoFollow) return
+    scrollRadioToLatest()
+    lastSeenRadioCountRef.current = filteredRadioLog.length
+  }, [filteredRadioLog.length, radioAutoFollow, scrollRadioToLatest])
+
+  const handleRadioScroll = useCallback(() => {
+    const node = logRef.current
+    if (!node) return
+    const nearBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 12
+    setRadioAutoFollow(nearBottom)
+    if (nearBottom) lastSeenRadioCountRef.current = filteredRadioLog.length
+  }, [filteredRadioLog.length])
 
   // Draw canvas
   useEffect(() => {
@@ -299,8 +402,8 @@ export default function DispatcherPage() {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    drawMap(ctx, state, waypointPreview, tick)
-  }, [state, waypointPreview, tick])
+    drawMap(ctx, state, waypointPreview, dragWaypoint, tick)
+  }, [state, waypointPreview, dragWaypoint, tick])
 
   // Canvas coordinate conversion
   const toCanvas = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -312,34 +415,121 @@ export default function DispatcherPage() {
     }
   }, [])
 
-  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const pos = toCanvas(e)
+  const isNearWaypoint = useCallback((pos: Pos, waypoint: Pos | null) => {
+    if (!waypoint) return false
+    return Math.hypot(pos.x - waypoint.x, pos.y - waypoint.y) <= 18
+  }, [])
+
+  const placeWaypoint = useCallback(async (pos: Pos) => {
     await fetch('/api/state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'dispatcher_places_waypoint', position: pos }),
     })
-  }, [toCanvas])
+  }, [])
+
+  const commitDraggedWaypoint = useCallback(async () => {
+    if (!isDraggingWaypointRef.current) return
+    isDraggingWaypointRef.current = false
+    setIsDraggingWaypoint(false)
+    setCanvasCursor('crosshair')
+    const dropped = dragWaypointRef.current
+    setDragWaypoint(null)
+    dragWaypointRef.current = null
+    if (dropped) await placeWaypoint(dropped)
+  }, [placeWaypoint])
+
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const pos = toCanvas(e)
+    const currentWaypoint = dragWaypointRef.current ?? state.waypoint
+    if (!isNearWaypoint(pos, currentWaypoint)) {
+      skipCanvasClickRef.current = false
+      return
+    }
+
+    skipCanvasClickRef.current = true
+    isDraggingWaypointRef.current = true
+    setIsDraggingWaypoint(true)
+    setCanvasCursor('grabbing')
+    dragWaypointRef.current = currentWaypoint
+    setDragWaypoint(currentWaypoint)
+    setWaypointPreview(currentWaypoint)
+  }, [toCanvas, state.waypoint, isNearWaypoint])
+
+  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (skipCanvasClickRef.current) {
+      skipCanvasClickRef.current = false
+      return
+    }
+    const pos = toCanvas(e)
+    await placeWaypoint(pos)
+  }, [toCanvas, placeWaypoint])
 
   const handleCanvasMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    setWaypointPreview(toCanvas(e))
-  }, [toCanvas])
+    const pos = toCanvas(e)
+    if (isDraggingWaypointRef.current) {
+      dragWaypointRef.current = pos
+      setDragWaypoint(pos)
+      setWaypointPreview(pos)
+      return
+    }
 
-  const clearWaypoint = async () => {
-    await fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'dispatcher_clears_waypoint' }),
-    })
-  }
+    setWaypointPreview(pos)
+    const currentWaypoint = dragWaypointRef.current ?? state.waypoint
+    setCanvasCursor(isNearWaypoint(pos, currentWaypoint) ? 'grab' : 'crosshair')
+  }, [toCanvas, state.waypoint, isNearWaypoint])
 
-  const resetAll = async () => {
-    await fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'reset' }),
-    })
-  }
+  const handleCanvasMouseUp = useCallback(() => {
+    void commitDraggedWaypoint()
+  }, [commitDraggedWaypoint])
+
+  const handleCanvasLeave = useCallback(() => {
+    setWaypointPreview(null)
+    if (isDraggingWaypointRef.current) {
+      void commitDraggedWaypoint()
+      return
+    }
+    setCanvasCursor('crosshair')
+  }, [commitDraggedWaypoint])
+
+  useEffect(() => {
+    if (!isDraggingWaypoint) return
+
+    const onMouseUp = () => {
+      void commitDraggedWaypoint()
+    }
+
+    window.addEventListener('mouseup', onMouseUp)
+    return () => window.removeEventListener('mouseup', onMouseUp)
+  }, [isDraggingWaypoint, commitDraggedWaypoint])
+
+  const sendDispatchMessage = useCallback(async (rawMessage: string) => {
+    const message = rawMessage.trim()
+    if (!message) return
+
+    try {
+      await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'dispatcher_radio_message', message }),
+      })
+      setRadioDraft('')
+      setRadioAutoFollow(true)
+    } catch {
+      // Ignore temporary network errors in demo UI.
+    }
+  }, [])
+
+  const handleRadioSubmit = useCallback((e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault()
+    void sendDispatchMessage(radioDraft)
+  }, [radioDraft, sendDispatchMessage])
+
+  const jumpRadioToLatest = useCallback(() => {
+    scrollRadioToLatest()
+    setRadioAutoFollow(true)
+    lastSeenRadioCountRef.current = filteredRadioLog.length
+  }, [scrollRadioToLatest, filteredRadioLog.length])
 
   // ── Speech Recognition helpers ──
   const startRecording = useCallback(() => {
@@ -357,6 +547,7 @@ export default function DispatcherPage() {
     recognition.lang = 'en-US'
 
     finalTranscriptRef.current = ''
+    setFinalTranscriptText('')
     setInterimText('')
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -372,6 +563,7 @@ export default function DispatcherPage() {
         }
       }
       finalTranscriptRef.current = final
+      setFinalTranscriptText(final)
       setInterimText(interim)
     }
 
@@ -399,6 +591,7 @@ export default function DispatcherPage() {
 
     const transcript = (finalTranscriptRef.current || interimText).trim()
     setInterimText('')
+    setFinalTranscriptText('')
 
     if (transcript) {
       await fetch('/api/state', {
@@ -437,10 +630,7 @@ export default function DispatcherPage() {
           <span className="font-display" style={{
             fontSize: '13px', fontWeight: 900, color: '#fff', letterSpacing: '0.12em',
           }}>
-            FIRE<span style={{ color: '#ff3131' }}>COMMAND</span>
-          </span>
-          <span className="font-mono" style={{ fontSize: '9px', color: '#4d1010', letterSpacing: '0.2em' }}>
-            DISPATCHER
+            Nigel
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '18px', flexWrap: 'wrap' }}>
@@ -450,17 +640,32 @@ export default function DispatcherPage() {
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
           </div>
-
-          <Link href="/" className="font-mono" style={{
-            fontSize: '9px', color: '#333', textDecoration: 'none', letterSpacing: '0.1em',
-          }}>← HOME</Link>
+          <Link href="/threejs-cloud" className="font-mono" style={{
+            textDecoration: 'none',
+            border: '1px solid #2a2a2a',
+            color: '#ff3131',
+            padding: '5px 9px',
+            fontSize: '8px',
+            letterSpacing: '0.1em',
+          }}>
+            THREE.JS CLOUD
+          </Link>
+          <Link href="/" aria-label="Home" style={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            color: '#333', textDecoration: 'none', width: 28, height: 28,
+          }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+          </Link>
         </div>
       </div>
 
       {/* ── Body ── */}
       <div style={{
         flex: 1, display: 'grid',
-        gridTemplateColumns: isCompactLayout ? '1fr' : `${leftPanelWidth}px 1fr ${RIGHT_PANEL_WIDTH}px`,
+        gridTemplateColumns: isCompactLayout ? '1fr' : `${leftPanelWidth}px 1fr ${rightPanelWidth}px`,
         gridTemplateRows: isCompactLayout ? 'minmax(330px, 42vh) minmax(280px, 36vh) minmax(220px, 1fr)' : '1fr',
         gap: '8px',
         padding: '8px',
@@ -488,14 +693,12 @@ export default function DispatcherPage() {
                   liveFeedError={liveFeedError}
                   isExpanded={expandedFeedId === feed.id}
                   statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
-                  onToggleExpand={setExpandedFeedId}
+                  onToggleExpand={(id, seekTime) => {
+                    setExpandedFeedId(id)
+                    if (seekTime !== undefined) setExpandedFeedSeekTime(seekTime)
+                  }}
                 />
               ))}
-            </div>
-            <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
-              <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
-                ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
-              </div>
             </div>
           </div>
 
@@ -548,12 +751,26 @@ export default function DispatcherPage() {
         */}
         <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <div className="panel-header" style={{ justifyContent: 'space-between' }}>
-            <span>3D MAP // LOCATION</span>
-            <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
-              {state.waypoint
-                ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
-                : 'NO WAYPOINT'}
-            </span>
+            <span>Map</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
+                {dragWaypoint
+                  ? 'DRAGGING WAYPOINT'
+                  : state.waypoint
+                    ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
+                    : 'NO WAYPOINT'}
+              </span>
+              <Link href="/threejs-cloud" className="font-mono" style={{
+                textDecoration: 'none',
+                border: '1px solid #2a2a2a',
+                color: '#ff3131',
+                fontSize: '7px',
+                letterSpacing: '0.08em',
+                padding: '3px 6px',
+              }}>
+                OPEN THREE.JS
+              </Link>
+            </div>
           </div>
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
 
@@ -574,120 +791,334 @@ export default function DispatcherPage() {
               style={{
                 position: 'absolute', inset: 0,
                 width: '100%', height: '100%',
-                cursor: 'crosshair', display: 'block',
+                cursor: isDraggingWaypoint ? 'grabbing' : canvasCursor, display: 'block',
                 zIndex: 1,
                 background: 'transparent',
               }}
+              onMouseDown={handleCanvasMouseDown}
+              onMouseUp={handleCanvasMouseUp}
               onClick={handleCanvasClick}
               onMouseMove={handleCanvasMove}
-              onMouseLeave={() => setWaypointPreview(null)}
+              onMouseLeave={handleCanvasLeave}
             />
           </div>
         </div>
 
         {/* Right: Radio Log */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-          <div className="panel-header" style={{ justifyContent: 'space-between' }}>
-            <span>RADIO LOG</span>
-            {/* ── Mic Button ── */}
+        <div style={{ position: 'relative', minHeight: 0 }}>
+          {!isCompactLayout && (
             <button
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onMouseLeave={() => { if (isRecording) stopRecording() }}
-              className="font-mono"
+              type="button"
+              aria-label="Resize radio panel"
+              onMouseDown={startResizingRadio}
               style={{
-                background: isRecording ? '#2a0000' : 'transparent',
-                border: `1px solid ${isRecording ? '#ff3131' : '#2a2a2a'}`,
-                borderRadius: '3px',
-                color: isRecording ? '#ff3131' : '#666',
-                fontSize: '8px',
-                padding: '3px 8px',
-                cursor: 'pointer',
-                letterSpacing: '0.1em',
-                fontFamily: 'inherit',
-                transition: 'all 0.15s',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '4px',
-                boxShadow: isRecording ? '0 0 8px rgba(255,49,49,0.4)' : 'none',
+                position: 'absolute',
+                top: '8px',
+                bottom: '8px',
+                left: '-10px',
+                width: '12px',
+                padding: 0,
+                border: 'none',
+                background: 'transparent',
+                cursor: 'col-resize',
+                zIndex: 8,
               }}
             >
-              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
-                <rect x="3" y="0" width="4" height="7" rx="2"
-                  fill={isRecording ? '#ff3131' : '#666'}
-                  style={{ transition: 'fill 0.15s' }}
-                />
-                <path d="M1 6 Q1 10 5 10 Q9 10 9 6"
-                  stroke={isRecording ? '#ff3131' : '#666'}
-                  strokeWidth="1" fill="none"
-                  style={{ transition: 'stroke 0.15s' }}
-                />
-                <line x1="5" y1="10" x2="5" y2="13"
-                  stroke={isRecording ? '#ff3131' : '#666'}
-                  strokeWidth="1"
-                  style={{ transition: 'stroke 0.15s' }}
-                />
-              </svg>
-              {isRecording ? 'LIVE' : 'HOLD'}
+              <span style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: '5px',
+                width: '2px',
+                background: isResizingRadio ? '#ff3131' : '#1a1a1a',
+                boxShadow: isResizingRadio ? '0 0 8px rgba(255,49,49,0.8)' : 'none',
+              }} />
             </button>
-          </div>
+          )}
 
-          {/* Interim transcript preview */}
-          {isRecording && (
-            <div style={{
-              padding: '6px 8px',
-              borderBottom: '1px solid #1a1a1a',
-              background: '#0a0000',
-            }}>
-              <div className="font-mono" style={{
-                fontSize: '8px', color: '#ff3131', letterSpacing: '0.1em',
-                display: 'flex', alignItems: 'center', gap: '6px',
-              }}>
-                <span style={{
-                  width: '5px', height: '5px', borderRadius: '50%',
-                  background: '#ff3131',
-                  animation: 'pulse-dot 1s infinite',
-                  flexShrink: 0,
-                }} />
-                TRANSMITTING
+          <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%' }}>
+            <div className="panel-header" style={{ justifyContent: 'space-between' }}>
+              <span>RADIO TRANSCRIPT</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="font-mono" style={{ fontSize: '7px', color: criticalRadioCount > 0 ? '#ff3131' : '#4d4d4d' }}>
+                  {criticalRadioCount > 0 ? `${criticalRadioCount} CRITICAL` : 'MONITORING'}
+                </span>
+                <button
+                  onMouseDown={startRecording}
+                  onMouseUp={stopRecording}
+                  onMouseLeave={() => { if (isRecording) void stopRecording() }}
+                  className="font-mono"
+                  style={{
+                    background: isRecording ? '#2a0000' : 'transparent',
+                    border: `1px solid ${isRecording ? '#ff3131' : '#2a2a2a'}`,
+                    borderRadius: '3px',
+                    color: isRecording ? '#ff3131' : '#666',
+                    fontSize: '8px',
+                    padding: '3px 8px',
+                    cursor: 'pointer',
+                    letterSpacing: '0.1em',
+                    fontFamily: 'inherit',
+                    transition: 'all 0.15s',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    boxShadow: isRecording ? '0 0 8px rgba(255,49,49,0.4)' : 'none',
+                  }}
+                >
+                  <svg width="10" height="14" viewBox="0 0 10 14" fill="none" aria-hidden="true">
+                    <rect x="3" y="0" width="4" height="7" rx="2"
+                      fill={isRecording ? '#ff3131' : '#666'}
+                      style={{ transition: 'fill 0.15s' }}
+                    />
+                    <path d="M1 6 Q1 10 5 10 Q9 10 9 6"
+                      stroke={isRecording ? '#ff3131' : '#666'}
+                      strokeWidth="1" fill="none"
+                      style={{ transition: 'stroke 0.15s' }}
+                    />
+                    <line x1="5" y1="10" x2="5" y2="13"
+                      stroke={isRecording ? '#ff3131' : '#666'}
+                      strokeWidth="1"
+                      style={{ transition: 'stroke 0.15s' }}
+                    />
+                  </svg>
+                  {isRecording ? 'LIVE' : 'HOLD'}
+                </button>
               </div>
-              {(interimText || finalTranscriptRef.current) && (
+            </div>
+
+            {isRecording && (
+              <div style={{
+                padding: '6px 8px',
+                borderBottom: '1px solid #1a1a1a',
+                background: '#0a0000',
+              }}>
                 <div className="font-mono" style={{
-                  fontSize: '9px', color: '#c0c0c0', marginTop: '4px',
-                  fontStyle: 'italic',
+                  fontSize: '8px', color: '#ff3131', letterSpacing: '0.1em',
+                  display: 'flex', alignItems: 'center', gap: '6px',
                 }}>
-                  {finalTranscriptRef.current}{interimText}
+                  <span style={{
+                    width: '5px', height: '5px', borderRadius: '50%',
+                    background: '#ff3131',
+                    animation: 'pulse-dot 1s infinite',
+                    flexShrink: 0,
+                  }} />
+                  TRANSMITTING
+                </div>
+                {(interimText || finalTranscriptText) && (
+                  <div className="font-mono" style={{
+                    fontSize: '9px', color: '#c0c0c0', marginTop: '4px', fontStyle: 'italic',
+                  }}>
+                    {finalTranscriptText}{interimText}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '6px',
+              padding: '8px',
+              borderBottom: '1px solid #1a1a1a',
+            }}>
+              {RADIO_FILTERS.map(filter => {
+                const active = filter === radioFilter
+                return (
+                  <button
+                    key={filter}
+                    type="button"
+                    className="font-mono"
+                    onClick={() => {
+                      setRadioFilter(filter)
+                      setRadioAutoFollow(true)
+                    }}
+                    style={{
+                      border: `1px solid ${active ? '#ff3131' : '#2a2a2a'}`,
+                      color: active ? '#ff3131' : '#777',
+                      background: active ? 'rgba(255,49,49,0.08)' : 'transparent',
+                      padding: '3px 6px',
+                      fontSize: '7px',
+                      letterSpacing: '0.08em',
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {filter}
+                  </button>
+                )
+              })}
+            </div>
+
+            <div
+              ref={logRef}
+              onScroll={handleRadioScroll}
+              style={{
+                flex: 1,
+                overflowY: 'auto',
+                padding: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}
+            >
+              {filteredRadioLog.map(msg => {
+                const severity = classifyRadioSeverity(msg.message)
+                const severityColor =
+                  severity === 'critical' ? '#ff3131' :
+                    severity === 'warning' ? '#eab308' : '#2a2a2a'
+                return (
+                  <div key={msg.id} className="anim-in" style={{
+                    flexShrink: 0,
+                    border: `1px solid ${severityColor}`,
+                    background: 'rgba(7,7,7,0.88)',
+                    padding: '6px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' }}>
+                      <span className="font-mono" style={{
+                        fontSize: '8px',
+                        fontWeight: 700,
+                        color: fromColor(msg.from),
+                        letterSpacing: '0.08em',
+                      }}>
+                        {msg.from}
+                      </span>
+                      <span className="font-mono" style={{ fontSize: '7px', color: '#4d4d4d', letterSpacing: '0.08em' }}>
+                        {msg.timestamp}
+                      </span>
+                    </div>
+                    <span className="font-mono" style={{
+                      fontSize: '9px',
+                      color: '#d2d2d2',
+                      lineHeight: 1.45,
+                    }}>
+                      {msg.message}
+                    </span>
+                    {severity !== 'normal' && (
+                      <span className="font-mono" style={{
+                        fontSize: '7px',
+                        color: severityColor,
+                        letterSpacing: '0.12em',
+                      }}>
+                        {severity === 'critical' ? 'PRIORITY ALERT' : 'ATTENTION'}
+                      </span>
+                    )}
+                  </div>
+                )
+              })}
+
+              {filteredRadioLog.length === 0 && (
+                <div className="font-mono" style={{
+                  color: '#4d4d4d',
+                  fontSize: '8px',
+                  letterSpacing: '0.1em',
+                  textAlign: 'center',
+                  padding: '12px 6px',
+                }}>
+                  NO RADIO ITEMS IN THIS FILTER
                 </div>
               )}
             </div>
-          )}
 
-
-          <div
-            ref={logRef}
-            style={{
-              flex: 1, overflowY: 'auto', padding: '8px',
-              display: 'flex', flexDirection: 'column', gap: '4px',
-            }}
-          >
-            {state.radioLog.map(msg => (
-              <div key={msg.id} className="anim-in" style={{ flexShrink: 0 }}>
-                <span className="font-mono" style={{ fontSize: '8px', color: '#333' }}>
-                  {msg.timestamp}
-                </span>
-                {' '}
+            <div style={{
+              borderTop: '1px solid #1a1a1a',
+              padding: '8px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '6px',
+            }}>
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
                 <span className="font-mono" style={{
-                  fontSize: '9px', fontWeight: 700,
-                  color: fromColor(msg.from),
+                  fontSize: '7px',
+                  color: isRecording ? '#ff3131' : '#4d4d4d',
+                  letterSpacing: '0.08em',
                 }}>
-                  [{msg.from}]
+                  {isRecording ? 'VOICE ACTIVE' : 'HOLD MIC TO TALK'}
                 </span>
-                {' '}
-                <span className="font-mono" style={{ fontSize: '9px', color: '#c0c0c0' }}>
-                  {msg.message}
-                </span>
+                {!radioAutoFollow && (
+                  <button
+                    type="button"
+                    className="font-mono"
+                    onClick={jumpRadioToLatest}
+                    style={{
+                      marginLeft: 'auto',
+                      border: '1px solid #2a2a2a',
+                      background: 'transparent',
+                      color: '#ff3131',
+                      padding: '4px 6px',
+                      fontSize: '7px',
+                      letterSpacing: '0.08em',
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    JUMP LATEST
+                  </button>
+                )}
               </div>
-            ))}
+
+              <form onSubmit={handleRadioSubmit} style={{ display: 'flex', gap: '6px' }}>
+                <input
+                  value={radioDraft}
+                  onChange={e => setRadioDraft(e.target.value)}
+                  placeholder="Type dispatch message"
+                  className="font-mono"
+                  style={{
+                    flex: 1,
+                    background: '#040404',
+                    border: '1px solid #1a1a1a',
+                    color: '#cfcfcf',
+                    padding: '6px 8px',
+                    fontSize: '8px',
+                    letterSpacing: '0.04em',
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="font-mono"
+                  disabled={!radioDraft.trim()}
+                  style={{
+                    border: `1px solid ${radioDraft.trim() ? '#2a2a2a' : '#1a1a1a'}`,
+                    color: radioDraft.trim() ? '#a0a0a0' : '#3a3a3a',
+                    background: 'transparent',
+                    padding: '6px 9px',
+                    fontSize: '8px',
+                    letterSpacing: '0.1em',
+                    cursor: radioDraft.trim() ? 'pointer' : 'not-allowed',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  SEND
+                </button>
+              </form>
+
+              <div style={{ display: 'grid', gap: '5px' }}>
+                {QUICK_RADIO_MACROS.map(macro => (
+                  <button
+                    key={macro}
+                    type="button"
+                    className="font-mono"
+                    onClick={() => void sendDispatchMessage(macro)}
+                    style={{
+                      border: '1px solid #1a1a1a',
+                      background: '#050505',
+                      color: '#6f6f6f',
+                      padding: '5px 6px',
+                      textAlign: 'left',
+                      fontSize: '7px',
+                      letterSpacing: '0.05em',
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {macro}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -724,6 +1155,7 @@ export default function DispatcherPage() {
               statusText={expandedFeed.id === 'FF1' ? state.firefighterStatus : undefined}
               onToggleExpand={() => setExpandedFeedId(null)}
               lightbox
+              initialSeekTime={expandedFeedSeekTime}
             />
           </div>
         </div>
@@ -750,33 +1182,31 @@ function Stat({ label, value, accent, valueColor }: {
   )
 }
 
-function HBtn({ onClick, label, dim }: { onClick: () => void; label: string; dim?: boolean }) {
+function ExpandOutIcon() {
   return (
-    <button
-      onClick={onClick}
-      className="font-mono"
-      style={{
-        background: 'none',
-        border: `1px solid ${dim ? '#1a1a1a' : '#2a2a2a'}`,
-        color: dim ? '#333' : '#a0a0a0',
-        fontSize: '8px',
-        padding: '4px 10px',
-        cursor: 'pointer',
-        letterSpacing: '0.1em',
-        fontFamily: 'inherit',
-        transition: 'all 0.1s',
-      }}
-      onMouseEnter={e => {
-        (e.currentTarget as HTMLButtonElement).style.borderColor = '#ff3131'
-          ; (e.currentTarget as HTMLButtonElement).style.color = '#ff3131'
-      }}
-      onMouseLeave={e => {
-        (e.currentTarget as HTMLButtonElement).style.borderColor = dim ? '#1a1a1a' : '#2a2a2a'
-          ; (e.currentTarget as HTMLButtonElement).style.color = dim ? '#333' : '#a0a0a0'
-      }}
-    >
-      {label}
-    </button>
+    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M6 6L2 2M2 4V2H4M8 6L12 2M10 2H12V4M6 8L2 12M2 10V12H4M8 8L12 12M10 12H12V10"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="square"
+        strokeLinejoin="miter"
+      />
+    </svg>
+  )
+}
+
+function ShrinkInIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+      <path
+        d="M2 2L6 6M6 4V6H4M12 2L8 6M10 6H8V4M2 12L6 8M6 10V8H4M12 12L8 8M10 8H8V10"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="square"
+        strokeLinejoin="miter"
+      />
+    </svg>
   )
 }
 
@@ -788,15 +1218,23 @@ function FeedTile({
   statusText,
   onToggleExpand,
   lightbox,
+  initialSeekTime,
 }: {
   feed: CameraFeed
   liveStream: MediaStream | null
   liveFeedError: string | null
   isExpanded: boolean
   statusText?: string
-  onToggleExpand: (id: string | null) => void
+  onToggleExpand: (id: string | null, seekTime?: number) => void
   lightbox?: boolean
+  initialSeekTime?: number
 }) {
+  const replayVideoRef = useRef<HTMLVideoElement>(null)
+  const handleReplayVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    replayVideoRef.current = el
+  }, [])
+  const baseIconColor = isExpanded ? '#ff3131' : '#a0a0a0'
+
   return (
     <div style={{
       border: '1px solid #1a1a1a',
@@ -826,25 +1264,62 @@ function FeedTile({
         </span>
         <button
           className="font-mono"
-          onClick={() => onToggleExpand(isExpanded ? null : feed.id)}
+          type="button"
+          aria-label={isExpanded ? `Shrink ${feed.label}` : `Expand ${feed.label}`}
+          title={isExpanded ? 'Shrink' : 'Expand'}
+          onClick={() => {
+            if (isExpanded) {
+              onToggleExpand(null)
+            } else {
+              const t = feed.kind === 'video' ? replayVideoRef.current?.currentTime : undefined
+              onToggleExpand(feed.id, t ?? 0)
+            }
+          }}
           style={{
             border: '1px solid #2a2a2a',
             background: 'none',
-            color: '#a0a0a0',
-            fontSize: lightbox ? '8px' : '7px',
+            color: baseIconColor,
             cursor: 'pointer',
-            letterSpacing: '0.08em',
-            padding: lightbox ? '5px 8px' : '3px 5px',
+            width: lightbox ? '32px' : '24px',
+            height: lightbox ? '20px' : '14px',
+            padding: 0,
             fontFamily: 'inherit',
             flexShrink: 0,
+            display: 'grid',
+            placeItems: 'center',
+            outline: 'none',
+          }}
+          onMouseEnter={e => {
+            const btn = e.currentTarget as HTMLButtonElement
+            if (document.activeElement !== btn) {
+              btn.style.borderColor = '#ff3131'
+              btn.style.color = '#ff3131'
+            }
+          }}
+          onMouseLeave={e => {
+            const btn = e.currentTarget as HTMLButtonElement
+            if (document.activeElement !== btn) {
+              btn.style.borderColor = '#2a2a2a'
+              btn.style.color = baseIconColor
+            }
+          }}
+          onFocus={e => {
+            (e.currentTarget as HTMLButtonElement).style.borderColor = '#2a2a2a'
+            ;(e.currentTarget as HTMLButtonElement).style.color = baseIconColor
           }}
         >
-          {isExpanded ? 'SHRINK' : 'EXPAND'}
+          {isExpanded ? <ShrinkInIcon /> : <ExpandOutIcon />}
         </button>
       </div>
 
       <div className="scanlines" style={{ flex: 1, minHeight: 0, position: 'relative', background: '#000' }}>
-        <FeedViewport feed={feed} liveStream={liveStream} liveFeedError={liveFeedError} />
+        <FeedViewport
+          feed={feed}
+          liveStream={liveStream}
+          liveFeedError={liveFeedError}
+          onReplayVideoRef={handleReplayVideoRef}
+          initialSeekTime={initialSeekTime}
+        />
       </div>
 
       <div style={{
@@ -861,15 +1336,6 @@ function FeedTile({
         }}>
           {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'SIMULATED LIVE FEED'}
         </span>
-        {statusText && (
-          <span className="font-mono" style={{
-            fontSize: lightbox ? '8px' : '7px',
-            color: statusColor(statusText),
-            letterSpacing: '0.08em',
-          }}>
-            {statusText.toUpperCase()}
-          </span>
-        )}
       </div>
     </div>
   )
@@ -879,13 +1345,24 @@ function FeedViewport({
   feed,
   liveStream,
   liveFeedError,
+  onReplayVideoRef,
+  initialSeekTime,
 }: {
   feed: CameraFeed
   liveStream: MediaStream | null
   liveFeedError: string | null
+  onReplayVideoRef?: (el: HTMLVideoElement | null) => void
+  initialSeekTime?: number
 }) {
   const liveVideoRef = useRef<HTMLVideoElement>(null)
-  const replayVideoRef = useRef<HTMLVideoElement>(null)
+  const internalReplayRef = useRef<HTMLVideoElement>(null)
+  const setReplayRef = useCallback(
+    (el: HTMLVideoElement | null) => {
+      internalReplayRef.current = el
+      if (onReplayVideoRef) onReplayVideoRef(el)
+    },
+    [onReplayVideoRef],
+  )
 
   useEffect(() => {
     const el = liveVideoRef.current
@@ -899,13 +1376,21 @@ function FeedViewport({
   }, [feed.kind, liveStream])
 
   useEffect(() => {
-    const el = replayVideoRef.current
+    const el = internalReplayRef.current
     if (!el || feed.kind !== 'video') return
     el.muted = true
     el.defaultMuted = true
     el.volume = 0
     void el.play().catch(() => { })
   }, [feed.kind, feed.src])
+
+  const applyInitialSeek = useCallback(() => {
+    const el = internalReplayRef.current
+    if (el && feed.kind === 'video' && initialSeekTime !== undefined && !Number.isNaN(initialSeekTime)) {
+      el.currentTime = initialSeekTime
+      void el.play().catch(() => {})
+    }
+  }, [feed.kind, initialSeekTime])
 
   if (feed.kind === 'live') {
     return (
@@ -943,7 +1428,7 @@ function FeedViewport({
 
   return (
     <video
-      ref={replayVideoRef}
+      ref={setReplayRef}
       src={feed.src}
       autoPlay
       muted
@@ -954,6 +1439,8 @@ function FeedViewport({
       controls={false}
       tabIndex={-1}
       onContextMenu={e => e.preventDefault()}
+      onLoadedMetadata={applyInitialSeek}
+      onLoadedData={applyInitialSeek}
       style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
     />
   )

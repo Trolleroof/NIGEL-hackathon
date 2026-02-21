@@ -25,7 +25,7 @@ export default function Home() {
     }}>
       <div style={{ textAlign: 'center', marginBottom: '56px' }}>
         <div className="font-mono" style={{
-          fontSize: '10px', color: '#4d1010',
+          fontSize: '10px', color: '#c03030',
           letterSpacing: '0.3em', marginBottom: '16px',
           textTransform: 'uppercase',
         }}>
@@ -33,13 +33,13 @@ export default function Home() {
         </div>
         <h1 className="font-display" style={{
           fontSize: 'clamp(48px, 8vw, 88px)', fontWeight: 900,
-          color: '#ffffff', letterSpacing: '0.08em', lineHeight: 1, margin: 0,
+          color: '#fff', letterSpacing: '0.12em', lineHeight: 1, margin: 0,
         }}>
-          FIRE<span style={{ color: '#ff3131' }}>COMMAND</span>
+          NIGEL
         </h1>
   
         <div className="font-mono" style={{
-          fontSize: '11px', color: '#333', marginTop: '20px', letterSpacing: '0.15em',
+          fontSize: '11px', color: '#888', marginTop: '20px', letterSpacing: '0.15em',
         }}>
           {time || '00:00:00'}
         </div>
@@ -49,6 +49,7 @@ export default function Home() {
         {[
           { href: '/dispatcher', label: 'DISPATCHER', sub: 'COMMAND CENTER', note: 'LAPTOP' },
           { href: '/firefighter', label: 'FIREFIGHTER', sub: 'UNIT FF1', note: 'PHONE / TABLET' },
+          { href: '/threejs-cloud', label: 'THREE.JS CLOUD', sub: 'POINT MAP', note: 'ORBIT + WAYPOINT' },
         ].map(({ href, label, sub, note }) => (
           <Link key={href} href={href} style={{ textDecoration: 'none' }}>
             <div className="panel" style={{
@@ -75,7 +76,7 @@ export default function Home() {
                 {sub}
               </div>
               <div className="font-mono" style={{
-                fontSize: '9px', color: '#4d1010', marginTop: '16px',
+                fontSize: '9px', color: '#c03030', marginTop: '16px',
                 letterSpacing: '0.15em',
               }}>
                 → {note}
@@ -85,12 +86,6 @@ export default function Home() {
         ))}
       </div>
 
-      <div className="font-mono" style={{
-        position: 'fixed', bottom: '16px',
-        fontSize: '8px', color: '#1a1a1a', letterSpacing: '0.2em',
-      }}>
-        HACKATHON PROTOTYPE // NOT FOR OPERATIONAL USE
-      </div>
     </div>
   )
 }

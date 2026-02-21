@@ -11,7 +11,6 @@ interface NigelState {
 }
 
 declare global {
-  // eslint-disable-next-line no-var
   var _nigelState: NigelState | undefined
 }
 
@@ -87,6 +86,7 @@ export async function POST(request: Request) {
       break
 
     case 'dispatcher_voice_message':
+    case 'dispatcher_radio_message':
       state.radioLog.push({
         id: Date.now(), from: 'DISPATCH',
         message: body.message,

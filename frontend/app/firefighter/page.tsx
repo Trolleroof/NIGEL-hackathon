@@ -5,6 +5,8 @@ import Link from 'next/link'
 // ─── Constants ───────────────────────────────────────────────────────
 const STEP = 10
 const BOUNDS = { xMin: 82, xMax: 818, yMin: 52, yMax: 448 }
+const CW = 900   // logical canvas width (matches dispatcher)
+const CH = 500   // logical canvas height
 
 const STATUSES = ['OK', 'Searching', 'Victim Found', 'Need Help'] as const
 type StatusType = typeof STATUSES[number]
@@ -16,75 +18,176 @@ function statusColor(s: StatusType) {
   return '#ff3131'
 }
 
+function fromColor(from: string) {
+  if (from === 'DISPATCH') return '#ff3131'
+  if (from === 'SYSTEM') return '#444'
+  return '#a0a0a0'
+}
+
+// ─── Mini-map canvas draw ─────────────────────────────────────────────
+// Simple walls for the mini-map (same logical coords as dispatcher)
+const WALLS: [number, number, number, number][] = [
+  [80, 50, 820, 50], [80, 50, 80, 450], [820, 50, 820, 450],
+  [80, 450, 405, 450], [465, 450, 820, 450],
+  [290, 50, 290, 135], [290, 180, 290, 210],
+  [530, 50, 530, 135], [530, 180, 530, 210],
+  [80, 210, 170, 210], [230, 210, 400, 210], [460, 210, 580, 210],
+  [80, 340, 370, 340], [435, 340, 820, 340],
+]
+
+function drawMiniMap(
+  ctx: CanvasRenderingContext2D,
+  ffPos: { x: number; y: number },
+  waypoint: { x: number; y: number } | null,
+  breadcrumbs: { x: number; y: number }[],
+  tick: number,
+) {
+  ctx.clearRect(0, 0, CW, CH)
+
+  // Background
+  ctx.fillStyle = '#111'
+  ctx.fillRect(0, 0, CW, CH)
+
+  // Grid
+  ctx.fillStyle = '#1c1c1c'
+  for (let x = 0; x < CW; x += 30) {
+    for (let y = 0; y < CH; y += 30) {
+      ctx.fillRect(x, y, 1, 1)
+    }
+  }
+
+  // Floor
+  ctx.fillStyle = '#151515'
+  ctx.fillRect(81, 51, 738, 398)
+
+  // Walls
+  ctx.strokeStyle = '#6b1515'
+  ctx.lineWidth = 2
+  ctx.lineCap = 'square'
+  for (const [x1, y1, x2, y2] of WALLS) {
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke()
+  }
+
+  // Breadcrumbs
+  for (let i = 0; i < breadcrumbs.length; i++) {
+    const alpha = (i / breadcrumbs.length) * 0.5
+    ctx.fillStyle = `rgba(255,49,49,${alpha})`
+    ctx.beginPath(); ctx.arc(breadcrumbs[i].x, breadcrumbs[i].y, 2, 0, Math.PI * 2); ctx.fill()
+  }
+
+  // Waypoint
+  if (waypoint) {
+    const pulse = 0.6 + 0.4 * Math.sin(tick * 0.1)
+    const s = 14
+    ctx.strokeStyle = `rgba(255,49,49,${pulse})`
+    ctx.lineWidth = 1.5
+    ctx.beginPath(); ctx.moveTo(waypoint.x - s, waypoint.y); ctx.lineTo(waypoint.x + s, waypoint.y); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(waypoint.x, waypoint.y - s); ctx.lineTo(waypoint.x, waypoint.y + s); ctx.stroke()
+    ctx.beginPath(); ctx.arc(waypoint.x, waypoint.y, 6, 0, Math.PI * 2); ctx.stroke()
+    // line from FF to waypoint
+    ctx.strokeStyle = `rgba(255,49,49,0.15)`
+    ctx.lineWidth = 1
+    ctx.setLineDash([8, 8])
+    ctx.beginPath(); ctx.moveTo(ffPos.x, ffPos.y); ctx.lineTo(waypoint.x, waypoint.y); ctx.stroke()
+    ctx.setLineDash([])
+  }
+
+  // FF dot
+  const glow = 0.7 + 0.3 * Math.sin(tick * 0.06)
+  ctx.shadowColor = '#ff3131'
+  ctx.shadowBlur = 14 * glow
+  ctx.fillStyle = '#ff3131'
+  ctx.beginPath(); ctx.arc(ffPos.x, ffPos.y, 8, 0, Math.PI * 2); ctx.fill()
+  ctx.shadowBlur = 0
+  ctx.strokeStyle = 'rgba(255,49,49,0.35)'
+  ctx.lineWidth = 1
+  ctx.beginPath(); ctx.arc(ffPos.x, ffPos.y, 14, 0, Math.PI * 2); ctx.stroke()
+  ctx.fillStyle = '#fff'
+  ctx.font = 'bold 10px "Space Mono", monospace'
+  ctx.textAlign = 'left'
+  ctx.fillText('YOU', ffPos.x + 16, ffPos.y + 4)
+}
+
 // ─── Arrow SVG ────────────────────────────────────────────────────────
-function DirectionArrow({ angle, active }: { angle: number; active: boolean }) {
+function DirectionArrow({ angle }: { angle: number }) {
   return (
-    <svg
-      viewBox="0 0 100 140"
-      style={{
-        width: '160px',
-        height: '224px',
-        transform: `rotate(${angle}deg)`,
-        transition: 'transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)',
-        filter: active
-          ? 'drop-shadow(0 0 16px rgba(255,49,49,0.9)) drop-shadow(0 0 32px rgba(255,49,49,0.4))'
-          : 'drop-shadow(0 0 4px rgba(255,49,49,0.3))',
-        animation: active ? 'arrow-pulse 2s ease-in-out infinite' : 'none',
-      }}
-    >
-      {/* Arrow shaft */}
-      <rect x="42" y="60" width="16" height="70" fill={active ? '#ff3131' : '#4d1010'} rx="3" />
-      {/* Arrow head */}
-      <polygon points="50,0 100,70 72,60 72,60 28,60 0,70" fill={active ? '#ff3131' : '#4d1010'} />
+    <svg viewBox="0 0 100 140" style={{
+      width: '72px', height: '100px',
+      transform: `rotate(${angle}deg)`,
+      transition: 'transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1)',
+      filter: 'drop-shadow(0 0 12px rgba(255,49,49,0.8))',
+      animation: 'arrow-pulse 2s ease-in-out infinite',
+      flexShrink: 0,
+    }}>
+      <rect x="42" y="60" width="16" height="70" fill="#ff3131" rx="3" />
+      <polygon points="50,0 100,70 72,60 28,60 0,70" fill="#ff3131" />
     </svg>
   )
 }
 
-// ─── Compass ring (when no waypoint) ─────────────────────────────────
-function AwaitingIndicator() {
+// ─── Camera placeholder ───────────────────────────────────────────────
+// TODO: Replace with <img src={`http://${ROS_HOST}:8080/stream?topic=/ff1/odin1/image/compressed`} />
+function CamThumb() {
   return (
-    <div style={{ position: 'relative', width: '180px', height: '180px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      {/* Spinning ring */}
+    <div style={{
+      width: '64px', height: '48px',
+      background: '#0a0a0a',
+      border: '1px solid #1a1a1a',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      gap: '2px', flexShrink: 0, position: 'relative',
+      overflow: 'hidden',
+    }}>
+      {/* scanlines */}
       <div style={{
-        position: 'absolute', inset: 0, borderRadius: '50%',
-        border: '1px solid #1a1a1a',
-        borderTopColor: '#4d1010',
-        animation: 'spin-slow 3s linear infinite',
+        position: 'absolute', inset: 0,
+        backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.2) 2px, rgba(0,0,0,0.2) 4px)',
+        pointerEvents: 'none',
       }} />
-      <div style={{
-        position: 'absolute', inset: '20px', borderRadius: '50%',
-        border: '1px solid #111',
-        borderBottomColor: '#2a0808',
-        animation: 'spin-slow 5s linear infinite reverse',
-      }} />
-      <div style={{ textAlign: 'center' }}>
-        <div className="font-display" style={{
-          fontSize: '10px', fontWeight: 700, color: '#4d1010',
-          letterSpacing: '0.2em', lineHeight: 1.4,
-        }}>
-          AWAITING<br />ORDERS
-        </div>
-      </div>
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none" style={{ opacity: 0.3 }}>
+        <rect x="0" y="2" width="11" height="8" rx="1" stroke="#ff3131" strokeWidth="1.2" />
+        <polygon points="11,4 16,1 16,11 11,8" fill="#ff3131" opacity="0.5" />
+      </svg>
+      <span className="font-mono" style={{ fontSize: '6px', color: '#c03030', letterSpacing: '0.1em' }}>
+        /ff1/image
+      </span>
     </div>
   )
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────
+interface Msg { id: number; from: string; message: string; timestamp: string }
+
 export default function FirefighterPage() {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const logRef = useRef<HTMLDivElement>(null)
   const [ffPos, setFfPos] = useState({ x: 435, y: 400 })
   const [waypoint, setWaypoint] = useState<{ x: number; y: number } | null>(null)
+  const [breadcrumbs, setBreadcrumbs] = useState<{ x: number; y: number }[]>([])
   const [status, setStatus] = useState<StatusType>('OK')
+  const [radioLog, setRadioLog] = useState<Msg[]>([])
   const [transmitting, setTransmitting] = useState(false)
   const [lastMsg, setLastMsg] = useState('')
+  const [tick, setTick] = useState(0)
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const ffPosRef = useRef(ffPos)
-  ffPosRef.current = ffPos
 
   // ── Speech-to-Text refs ──
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
   const [interimText, setInterimText] = useState('')
+  const [finalTranscriptText, setFinalTranscriptText] = useState('')
+
+  useEffect(() => {
+    ffPosRef.current = ffPos
+  }, [ffPos])
+
+  // Tick for animations
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 80)
+    return () => clearInterval(id)
+  }, [])
 
   // Poll state
   useEffect(() => {
@@ -94,7 +197,9 @@ export default function FirefighterPage() {
         const data = await res.json()
         setWaypoint(data.waypoint)
         setFfPos(data.firefighterPosition)
+        setBreadcrumbs(data.breadcrumbs ?? [])
         setStatus(data.firefighterStatus)
+        setRadioLog(data.radioLog ?? [])
       } catch { /* ignore */ }
     }
     poll()
@@ -102,53 +207,55 @@ export default function FirefighterPage() {
     return () => clearInterval(id)
   }, [])
 
-  // Keyboard movement (WASD + arrows)
+  // Auto-scroll radio log
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+  }, [radioLog.length])
+
+  // Draw mini-map
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    drawMiniMap(ctx, ffPos, waypoint, breadcrumbs, tick)
+  }, [ffPos, waypoint, breadcrumbs, tick])
+
+  // Keyboard movement
   useEffect(() => {
     const pressed = new Set<string>()
-
     const onKeyDown = (e: KeyboardEvent) => {
       pressed.add(e.key)
-
       let dx = 0, dy = 0
       if (pressed.has('ArrowUp') || pressed.has('w') || pressed.has('W')) dy -= STEP
       if (pressed.has('ArrowDown') || pressed.has('s') || pressed.has('S')) dy += STEP
       if (pressed.has('ArrowLeft') || pressed.has('a') || pressed.has('A')) dx -= STEP
       if (pressed.has('ArrowRight') || pressed.has('d') || pressed.has('D')) dx += STEP
-
       if (dx !== 0 || dy !== 0) {
         const cur = ffPosRef.current
-        const nx = Math.max(BOUNDS.xMin, Math.min(BOUNDS.xMax, cur.x + dx))
-        const ny = Math.max(BOUNDS.yMin, Math.min(BOUNDS.yMax, cur.y + dy))
-        const newPos = { x: nx, y: ny }
+        const newPos = {
+          x: Math.max(BOUNDS.xMin, Math.min(BOUNDS.xMax, cur.x + dx)),
+          y: Math.max(BOUNDS.yMin, Math.min(BOUNDS.yMax, cur.y + dy)),
+        }
         setFfPos(newPos)
         fetch('/api/state', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: 'firefighter_position_update', position: newPos }),
         }).catch(() => { })
       }
     }
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      pressed.delete(e.key)
-    }
-
+    const onKeyUp = (e: KeyboardEvent) => pressed.delete(e.key)
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('keyup', onKeyUp)
-    }
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
   }, [])
 
   // Status cycle
   const cycleStatus = useCallback(async () => {
-    const idx = STATUSES.indexOf(status)
-    const next = STATUSES[(idx + 1) % STATUSES.length]
+    const next = STATUSES[(STATUSES.indexOf(status) + 1) % STATUSES.length]
     setStatus(next)
     await fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'firefighter_status_update', status: next }),
     })
   }, [status])
@@ -158,6 +265,7 @@ export default function FirefighterPage() {
     setTransmitting(true)
     setInterimText('')
     finalTranscriptRef.current = ''
+    setFinalTranscriptText('')
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any
@@ -188,6 +296,7 @@ export default function FirefighterPage() {
         }
       }
       finalTranscriptRef.current = final
+      setFinalTranscriptText(final)
       setInterimText(interim)
       setLastMsg(final + interim || 'LISTENING...')
     }
@@ -217,6 +326,7 @@ export default function FirefighterPage() {
 
     const transcript = (finalTranscriptRef.current || interimText).trim()
     setInterimText('')
+    setFinalTranscriptText('')
 
     if (transcript && transcript !== 'LISTENING...' && transcript !== 'TRANSMITTING...') {
       setLastMsg(transcript)
@@ -232,168 +342,215 @@ export default function FirefighterPage() {
     setTimeout(() => setLastMsg(''), 4000)
   }, [transmitting, interimText])
 
-  // Compute arrow angle and distance
+  // Arrow angle + distance
   const angle = waypoint
     ? Math.atan2(waypoint.y - ffPos.y, waypoint.x - ffPos.x) * (180 / Math.PI) + 90
     : 0
-
   const dist = waypoint
     ? (Math.sqrt((waypoint.x - ffPos.x) ** 2 + (waypoint.y - ffPos.y) ** 2) * 0.055).toFixed(1)
     : null
-
   const onTarget = waypoint && parseFloat(dist ?? '99') < 1.5
-
   const isNeedHelp = status === 'Need Help'
 
   return (
     <div style={{
-      width: '100vw', height: '100vh', background: '#000',
+      width: '100vw', height: '100dvh', background: '#0d0d0d',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      userSelect: 'none',
+      userSelect: 'none', WebkitUserSelect: 'none',
     }}>
 
       {/* ── Header ── */}
       <div style={{
-        height: '44px', borderBottom: '1px solid #1a1a1a', flexShrink: 0,
+        height: '48px', borderBottom: '1px solid #2a2a2a', flexShrink: 0,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '0 16px',
+        padding: '0 12px', gap: '10px',
       }}>
+        {/* Left: cam + unit ID */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <CamThumb />
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <div style={{
+                width: '7px', height: '7px', borderRadius: '50%',
+                background: '#ff3131', boxShadow: '0 0 6px #ff3131',
+                animation: 'pulse-dot 2s infinite', flexShrink: 0,
+              }} />
+              <span className="font-display" style={{ fontSize: '15px', fontWeight: 900, color: '#fff', letterSpacing: '0.08em' }}>
+                FF1
+              </span>
+            </div>
+            <div className="font-mono" style={{ fontSize: '8px', color: '#c03030', letterSpacing: '0.12em' }}>
+              NIGEL // ACTIVE
+            </div>
+          </div>
+        </div>
+
+        {/* Right: status pill + home */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <div style={{
-            width: '8px', height: '8px', borderRadius: '50%',
-            background: '#ff3131',
-            boxShadow: '0 0 8px #ff3131',
-            animation: 'pulse-dot 2s infinite',
-          }} />
-          <span className="font-display" style={{ fontSize: '14px', fontWeight: 900, color: '#fff', letterSpacing: '0.1em' }}>
-            FF1
-          </span>
-
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span className="font-mono" style={{ fontSize: '9px', color: '#333', letterSpacing: '0.1em' }}>
-            ↑↓←→ TO MOVE
-          </span>
-          <Link href="/" className="font-mono" style={{ fontSize: '9px', color: '#333', textDecoration: 'none' }}>
-            ← HOME
+            padding: '3px 10px', border: `1px solid ${statusColor(status)}`,
+            display: 'flex', alignItems: 'center', gap: '5px',
+          }}>
+            <div style={{
+              width: '5px', height: '5px', borderRadius: '50%',
+              background: statusColor(status),
+            }} />
+            <span className="font-mono" style={{ fontSize: '9px', color: statusColor(status), letterSpacing: '0.1em' }}>
+              {status.toUpperCase()}
+            </span>
+          </div>
+          <Link href="/" className="font-mono" style={{ fontSize: '9px', color: '#555', textDecoration: 'none' }}>
+            ←
           </Link>
         </div>
       </div>
 
-      {/* ── Arrow area (top ~65%) ── */}
-      <div style={{
-        flex: '0 0 65%', display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', gap: '16px',
-        position: 'relative',
-      }}>
-        {/* Background tac-grid */}
-        <div className="tac-bg" style={{ position: 'absolute', inset: 0, opacity: 0.4 }} />
+      {/* ── Need Help banner ── */}
+      {isNeedHelp && (
+        <div style={{
+          flexShrink: 0, padding: '6px', textAlign: 'center',
+          animation: 'need-help-flash 0.5s infinite',
+        }}>
+          <span className="font-display" style={{ fontSize: '11px', fontWeight: 900, color: '#fff', letterSpacing: '0.3em' }}>
+            ⚠ NEED HELP ⚠
+          </span>
+        </div>
+      )}
 
-        {/* Alert banner for Need Help */}
-        {isNeedHelp && (
+      {/* ── Mini-map ── */}
+      <div style={{ flex: 4, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
+        <canvas
+          ref={canvasRef}
+          width={CW}
+          height={CH}
+          style={{ width: '100%', height: '100%', display: 'block' }}
+        />
+        {/* On-target overlay */}
+        {onTarget && (
           <div style={{
-            position: 'absolute', top: 0, left: 0, right: 0,
-            padding: '8px', textAlign: 'center',
-            animation: 'need-help-flash 0.5s infinite',
+            position: 'absolute', inset: 0, display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+            pointerEvents: 'none',
           }}>
-            <span className="font-display" style={{ fontSize: '12px', fontWeight: 900, color: '#fff', letterSpacing: '0.3em' }}>
-              ⚠ NEED HELP ⚠
-            </span>
+            <span className="font-display" style={{
+              fontSize: '32px', fontWeight: 900, color: '#ff3131',
+              letterSpacing: '0.2em', textShadow: '0 0 24px rgba(255,49,49,0.9)',
+              animation: 'pulse-dot 0.8s infinite',
+            }}>ON TARGET</span>
           </div>
         )}
-
-        <div style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '20px' }}>
-          {onTarget ? (
-            <div style={{ textAlign: 'center' }}>
-              <div className="font-display" style={{
-                fontSize: '28px', fontWeight: 900, color: '#ff3131',
-                letterSpacing: '0.2em',
-                textShadow: '0 0 20px rgba(255,49,49,0.8)',
-                animation: 'pulse-dot 1s infinite',
-              }}>
-                ON TARGET
-              </div>
-            </div>
-          ) : waypoint ? (
-            <DirectionArrow angle={angle} active />
-          ) : (
-            <AwaitingIndicator />
-          )}
-
-          {/* Distance */}
-          <div style={{ textAlign: 'center' }}>
-            {dist ? (
-              <div className="font-mono" style={{
-                fontSize: '32px', fontWeight: 700, color: '#fff', letterSpacing: '0.05em',
-              }}>
-                {dist}<span style={{ fontSize: '16px', color: '#a0a0a0', marginLeft: '4px' }}>m</span>
-              </div>
-            ) : (
-              <div className="font-mono" style={{ fontSize: '12px', color: '#333', letterSpacing: '0.2em' }}>
-                STANDBY
-              </div>
-            )}
-            {dist && (
-              <div className="font-mono" style={{ fontSize: '9px', color: '#4d4d4d', letterSpacing: '0.15em', marginTop: '2px' }}>
-                TO TARGET
-              </div>
-            )}
-          </div>
-
-          {/* Last transmitted message */}
-          {lastMsg && (
-            <div className="font-mono anim-in" style={{
-              fontSize: '10px', color: '#ff3131', maxWidth: '280px',
-              textAlign: 'center', letterSpacing: '0.05em',
-              padding: '6px 12px', border: '1px solid #4d1010',
-            }}>
-              {lastMsg}
-            </div>
-          )}
+        {/* Map label */}
+        <div style={{
+          position: 'absolute', top: '8px', right: '10px',
+          display: 'flex', alignItems: 'center', gap: '4px',
+        }}>
+          <span className="font-mono" style={{ fontSize: '8px', color: '#555', letterSpacing: '0.1em' }}>
+            FLOOR MAP
+          </span>
         </div>
       </div>
 
-      {/* ── Controls (bottom ~35%) ── */}
+      {/* ── Direction strip ── */}
       <div style={{
-        flex: '0 0 35%', borderTop: '1px solid #1a1a1a',
-        display: 'flex', gap: '0', flexShrink: 0,
+        flex: 2, borderTop: '1px solid #1a1a1a', borderBottom: '1px solid #2a2a2a',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: '20px', padding: '0 20px', minHeight: 0, overflow: 'hidden',
+        background: '#0f0f0f',
       }}>
+        {waypoint && !onTarget ? (
+          <>
+            <DirectionArrow angle={angle} />
+            <div>
+              <div className="font-mono" style={{
+                fontSize: '36px', fontWeight: 700, color: '#fff',
+                letterSpacing: '0.03em', lineHeight: 1,
+              }}>
+                {dist}<span style={{ fontSize: '16px', color: '#666', marginLeft: '3px' }}>m</span>
+              </div>
+              <div className="font-mono" style={{ fontSize: '9px', color: '#777', letterSpacing: '0.15em', marginTop: '2px' }}>
+                TO TARGET
+              </div>
+              {lastMsg && (
+                <div className="font-mono anim-in" style={{
+                  fontSize: '9px', color: '#ff3131', marginTop: '6px',
+                  maxWidth: '160px', lineHeight: 1.4,
+                }}>
+                  {lastMsg}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div style={{ textAlign: 'center' }}>
+            {lastMsg ? (
+              <div className="font-mono anim-in" style={{ fontSize: '10px', color: '#ff3131', letterSpacing: '0.05em' }}>
+                {lastMsg}
+              </div>
+            ) : (
+              <div className="font-mono" style={{ fontSize: '10px', color: '#555', letterSpacing: '0.2em' }}>
+                {onTarget ? 'ON TARGET' : 'STANDBY — AWAITING WAYPOINT'}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
-        {/* Status button */}
+      {/* ── Radio log ── */}
+      <div
+        ref={logRef}
+        style={{
+          flex: 1.5, overflowY: 'auto', minHeight: 0,
+          borderBottom: '1px solid #2a2a2a',
+          padding: '6px 10px', display: 'flex', flexDirection: 'column', gap: '3px',
+          background: '#0d0d0d',
+        }}
+      >
+        {radioLog.slice(-20).map(msg => (
+          <div key={msg.id} style={{ flexShrink: 0 }}>
+            <span className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a' }}>{msg.timestamp} </span>
+            <span className="font-mono" style={{ fontSize: '9px', fontWeight: 700, color: fromColor(msg.from) }}>
+              [{msg.from}]
+            </span>
+            {' '}
+            <span className="font-mono" style={{ fontSize: '9px', color: '#777' }}>{msg.message}</span>
+          </div>
+        ))}
+        {radioLog.length === 0 && (
+          <div className="font-mono" style={{ fontSize: '8px', color: '#1a1a1a', letterSpacing: '0.15em' }}>
+            NO RADIO TRAFFIC
+          </div>
+        )}
+      </div>
+
+      {/* ── Bottom controls ── */}
+      <div style={{
+        flexShrink: 0, height: '88px',
+        display: 'flex',
+      }}>
+        {/* Status */}
         <button
           onClick={cycleStatus}
           style={{
-            flex: 1,
-            background: isNeedHelp ? 'transparent' : '#050505',
-            border: 'none',
-            borderRight: '1px solid #1a1a1a',
-            cursor: 'pointer',
-            display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center',
-            gap: '8px',
+            flex: 1, background: isNeedHelp ? 'transparent' : '#141414',
+            border: 'none', borderRight: '1px solid #2a2a2a',
+            cursor: 'pointer', display: 'flex', flexDirection: 'column',
+            alignItems: 'center', justifyContent: 'center', gap: '5px',
             animation: isNeedHelp ? 'need-help-flash 0.5s infinite' : 'none',
             WebkitTapHighlightColor: 'transparent',
           }}
           onTouchStart={() => { }}
         >
           <div style={{
-            width: '20px', height: '20px', borderRadius: '50%',
-            background: statusColor(status),
-            boxShadow: `0 0 12px ${statusColor(status)}`,
+            width: '16px', height: '16px', borderRadius: '50%',
+            background: statusColor(status), boxShadow: `0 0 10px ${statusColor(status)}`,
           }} />
-          <div className="font-display" style={{
-            fontSize: '14px', fontWeight: 700,
-            color: statusColor(status),
-            letterSpacing: '0.1em',
-          }}>
+          <div className="font-display" style={{ fontSize: '12px', fontWeight: 700, color: statusColor(status), letterSpacing: '0.08em' }}>
             {status.toUpperCase()}
           </div>
-          <div className="font-mono" style={{ fontSize: '8px', color: '#333', letterSpacing: '0.1em' }}>
-            TAP TO CHANGE
-          </div>
+          <div className="font-mono" style={{ fontSize: '7px', color: '#666', letterSpacing: '0.08em' }}>TAP TO CHANGE</div>
         </button>
 
-        {/* Mic / Transmit button */}
+        {/* Transmit */}
         <button
           onMouseDown={startHold}
           onMouseUp={endHold}
@@ -401,60 +558,33 @@ export default function FirefighterPage() {
           onTouchStart={e => { e.preventDefault(); startHold() }}
           onTouchEnd={e => { e.preventDefault(); endHold() }}
           style={{
-            flex: 1,
-            background: transmitting ? '#1a0000' : '#050505',
-            border: 'none',
-            cursor: 'pointer',
+            flex: 1, background: transmitting ? '#2a0000' : '#141414',
+            border: 'none', cursor: 'pointer',
             display: 'flex', flexDirection: 'column',
-            alignItems: 'center', justifyContent: 'center',
-            gap: '8px',
-            transition: 'background 0.1s',
-            WebkitTapHighlightColor: 'transparent',
+            alignItems: 'center', justifyContent: 'center', gap: '5px',
+            transition: 'background 0.1s', WebkitTapHighlightColor: 'transparent',
           }}
         >
-          {/* Mic icon */}
-          <svg width="32" height="40" viewBox="0 0 32 40" fill="none">
-            <rect x="10" y="0" width="12" height="22" rx="6"
-              fill={transmitting ? '#ff3131' : '#2a2a2a'}
-              style={{ transition: 'fill 0.1s' }}
-            />
-            <path d="M5 18 Q5 30 16 30 Q27 30 27 18"
-              stroke={transmitting ? '#ff3131' : '#2a2a2a'}
-              strokeWidth="2" fill="none"
-              style={{ transition: 'stroke 0.1s' }}
-            />
-            <line x1="16" y1="30" x2="16" y2="38"
-              stroke={transmitting ? '#ff3131' : '#2a2a2a'}
-              strokeWidth="2"
-              style={{ transition: 'stroke 0.1s' }}
-            />
-            <line x1="10" y1="38" x2="22" y2="38"
-              stroke={transmitting ? '#ff3131' : '#2a2a2a'}
-              strokeWidth="2"
-              style={{ transition: 'stroke 0.1s' }}
-            />
+          <svg width="24" height="30" viewBox="0 0 32 40" fill="none">
+            <rect x="10" y="0" width="12" height="22" rx="6" fill={transmitting ? '#ff3131' : '#555'} style={{ transition: 'fill 0.1s' }} />
+            <path d="M5 18 Q5 30 16 30 Q27 30 27 18" stroke={transmitting ? '#ff3131' : '#555'} strokeWidth="2" fill="none" style={{ transition: 'stroke 0.1s' }} />
+            <line x1="16" y1="30" x2="16" y2="38" stroke={transmitting ? '#ff3131' : '#555'} strokeWidth="2" style={{ transition: 'stroke 0.1s' }} />
+            <line x1="10" y1="38" x2="22" y2="38" stroke={transmitting ? '#ff3131' : '#555'} strokeWidth="2" style={{ transition: 'stroke 0.1s' }} />
           </svg>
-
           <div className="font-display" style={{
-            fontSize: '11px', fontWeight: 700,
-            color: transmitting ? '#ff3131' : '#2a2a2a',
-            letterSpacing: '0.15em',
-            transition: 'color 0.1s',
+            fontSize: '10px', fontWeight: 700, letterSpacing: '0.12em',
+            color: transmitting ? '#ff3131' : '#888', transition: 'color 0.1s',
           }}>
-            {transmitting ? 'TRANSMITTING' : 'TRANSMIT'}
+            {transmitting ? 'TX' : 'TRANSMIT'}
           </div>
-          <div className="font-mono" style={{ fontSize: '8px', color: '#222', letterSpacing: '0.1em' }}>
-            HOLD TO TALK
-          </div>
-
-          {/* Live transcript indicator */}
-          {transmitting && (interimText || finalTranscriptRef.current) && (
+          <div className="font-mono" style={{ fontSize: '7px', color: '#666', letterSpacing: '0.08em' }}>HOLD TO TALK</div>
+          {transmitting && (interimText || finalTranscriptText) && (
             <div className="font-mono" style={{
               fontSize: '8px', color: '#ff3131', maxWidth: '140px',
               textAlign: 'center', marginTop: '4px',
               fontStyle: 'italic', opacity: 0.8,
             }}>
-              {finalTranscriptRef.current}{interimText}
+              {finalTranscriptText}{interimText}
             </div>
           )}
         </button>

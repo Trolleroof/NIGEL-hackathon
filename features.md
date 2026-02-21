@@ -1,7 +1,7 @@
 # NIGEL: Navigation, Incident Guidance, and Emergency Localization & Control 
 
 ## 1. System Overview
-[cite_start]FireCommand is an intelligent "Mission Control" interface that transforms raw VSLAM (Visual Simultaneous Localization and Mapping) and radio chatter into a real-time, 3D tactical floor plan[cite: 6, 14]. Designed for the **Future Interfaces** hackathon, it modernizes traditional fire dispatch by creating a multi-modal agent that "understands" the mission context.
+[cite_start]NIGEL is an intelligent "Mission Control" interface that transforms raw VSLAM (Visual Simultaneous Localization and Mapping) and radio chatter into a real-time, 3D tactical floor plan[cite: 6, 14]. Designed for the **Future Interfaces** hackathon, it modernizes traditional fire dispatch by creating a multi-modal agent that "understands" the mission context.
 
 ---
 
