@@ -1,7 +1,8 @@
 'use client'
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import Link from 'next/link'
-import ThreeScene from '@/components/three-scene'
+import RosPointCloud from '@/components/three-scene'
+import { ThreeScene as BuildingSchematic } from './ThreeScene'
 
 // ─── Canvas constants ───────────────────────────────────────────────
 const CW = 900
@@ -188,6 +189,10 @@ export default function DispatcherPage() {
   const [radioFilter, setRadioFilter] = useState<RadioFilter>('ALL')
   const [radioDraft, setRadioDraft] = useState('')
   const [radioAutoFollow, setRadioAutoFollow] = useState(true)
+  const [mapSplitPercent, setMapSplitPercent] = useState(60) // top panel gets 60%
+  const [isResizingMap, setIsResizingMap] = useState(false)
+  const mapContainerRef = useRef<HTMLDivElement>(null)
+  const mapResizeStartRef = useRef<{ y: number; pct: number } | null>(null)
   const startRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null)
@@ -338,6 +343,47 @@ export default function DispatcherPage() {
     }
   }, [isResizingFeeds, clampLeftPanelWidth])
 
+  // ── Center panel vertical resize ──
+  const startResizingMap = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    mapResizeStartRef.current = { y: e.clientY, pct: mapSplitPercent }
+    setIsResizingMap(true)
+    e.preventDefault()
+  }, [mapSplitPercent])
+
+  useEffect(() => {
+    if (!isResizingMap) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      const start = mapResizeStartRef.current
+      const container = mapContainerRef.current
+      if (!start || !container) return
+      const containerH = container.getBoundingClientRect().height
+      if (containerH === 0) return
+      const deltaY = e.clientY - start.y
+      const deltaPct = (deltaY / containerH) * 100
+      const next = Math.min(Math.max(start.pct + deltaPct, 25), 85)
+      setMapSplitPercent(next)
+    }
+
+    const onMouseUp = () => {
+      setIsResizingMap(false)
+      mapResizeStartRef.current = null
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingMap])
+
+  // Auto-scroll log
   useEffect(() => {
     if (!isResizingRadio) return
 
@@ -739,7 +785,8 @@ export default function DispatcherPage() {
           Set your Three.js renderer's domElement to position:absolute, inset:0.
           ─────────────────────────────────────────────────────────────────
         */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+        <div ref={mapContainerRef} className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
+          {/* ── Top: Live ROS Point Cloud ── */}
           <div className="panel-header" style={{ justifyContent: 'space-between' }}>
             <span>Map</span>
             <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
@@ -750,18 +797,10 @@ export default function DispatcherPage() {
                   : 'NO WAYPOINT'}
             </span>
           </div>
-          <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
+          <div style={{ flex: `${mapSplitPercent} 0 0%`, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
+            <RosPointCloud />
 
-            {/* ── THREE.JS SCENE ─────────────────────────────────────────
-                Three.js scene for real-time point cloud visualization
-            ─────────────────────────────────────────────────────────── */}
-            <ThreeScene />
-
-            {/* ── WAYPOINT OVERLAY ─────────────────────────────────────
-                This canvas stays on top. Do not remove it.
-                It handles click-to-waypoint and draws the FF dot + trail
-                until those are owned by the Three.js scene.
-            ─────────────────────────────────────────────────────────── */}
+            {/* Waypoint overlay canvas */}
             <canvas
               ref={canvasRef}
               width={CW}
@@ -779,6 +818,44 @@ export default function DispatcherPage() {
               onMouseMove={handleCanvasMove}
               onMouseLeave={handleCanvasLeave}
             />
+          </div>
+
+          {/* ── Resize Handle ── */}
+          <div
+            onMouseDown={startResizingMap}
+            style={{
+              height: '6px',
+              flexShrink: 0,
+              cursor: 'row-resize',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: isResizingMap ? '#1a0505' : 'transparent',
+              borderTop: `1px solid ${isResizingMap ? '#ff3131' : '#1a1a1a'}`,
+              borderBottom: `1px solid ${isResizingMap ? '#ff3131' : '#1a1a1a'}`,
+              transition: 'border-color 0.15s, background 0.15s',
+            }}
+          >
+            <div style={{
+              width: '40px',
+              height: '2px',
+              borderRadius: '1px',
+              background: isResizingMap ? '#ff3131' : '#2a2a2a',
+              transition: 'background 0.15s',
+            }} />
+          </div>
+
+          {/* ── Bottom: Building Schematic ── */}
+          <div style={{
+            flex: `${100 - mapSplitPercent} 0 0%`,
+            position: 'relative',
+            overflow: 'hidden',
+            minHeight: 0,
+          }}>
+            <div className="panel-header" style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 2, background: 'rgba(0,0,0,0.7)' }}>
+              <span>BUILDING SCHEMATIC</span>
+            </div>
+            <BuildingSchematic />
           </div>
         </div>
 
