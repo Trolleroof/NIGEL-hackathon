@@ -127,6 +127,7 @@ export default function CameraWebSocketFeed({
           }}
         >
           {connectionStatus === 'connecting' && 'CONNECTING...'}
+          {connectionStatus === 'connected' && 'WAITING FOR FEED...'}
           {connectionStatus === 'disconnected' && 'NO SIGNAL'}
           {connectionStatus === 'error' && 'CONNECTION ERROR'}
         </div>

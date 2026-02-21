@@ -427,10 +427,17 @@ private:
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
       cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
-    } catch (const cv_bridge::Exception & e) {
-      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-        "cv_bridge failed: %s", e.what());
-      return;
+    } catch (const cv_bridge::Exception &) {
+      // bgr8 conversion failed — fall back to native encoding so we still get
+      // a frame (e.g. bayer, yuv422, mono8). OpenCV's imencode handles most
+      // formats that cv_bridge can return natively.
+      try {
+        cv_ptr = cv_bridge::toCvShare(msg);
+      } catch (const cv_bridge::Exception & e2) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+          "cv_bridge failed (encoding='%s'): %s", msg->encoding.c_str(), e2.what());
+        return;
+      }
     }
 
     cv::Mat to_encode;

@@ -1666,7 +1666,7 @@ function FeedTile({
           color: feed.kind === 'live' ? '#ff3131' : '#666',
           letterSpacing: '0.08em',
         }}>
-          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'SIMULATED LIVE FEED'}
+          {feed.kind === 'live' ? 'LIVE FEED' : 'SIMULATED LIVE FEED'}
         </span>
       </div>
     </div>

@@ -122,6 +122,14 @@ export class CameraWebSocket {
       return;
     }
 
+    // Ignore non-IMAG frames (PTCL, ODOM, PATH share the same WS port)
+    if (buffer.byteLength < 4) return;
+    const view = new DataView(buffer);
+    const magic = String.fromCharCode(
+      view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3)
+    );
+    if (magic !== 'IMAG') return;
+
     try {
       const frameData = this.parseCameraFrame(buffer);
 
