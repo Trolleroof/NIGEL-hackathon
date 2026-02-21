@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Link from 'next/link'
+import ThreeScene from '@/components/three-scene'
 
 // ─── Canvas constants ───────────────────────────────────────────────
 const CW = 900
@@ -556,11 +557,10 @@ export default function DispatcherPage() {
           </div>
           <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
 
-            {/* ── THREE.JS MOUNT POINT ──────────────────────────────────
-                Swap this div out for your <ThreeJsScene /> component.
-                It must be position:absolute, inset:0, z-index:0.
+            {/* ── THREE.JS SCENE ─────────────────────────────────────────
+                Three.js scene for real-time point cloud visualization
             ─────────────────────────────────────────────────────────── */}
-            <ThreeJsPlaceholder />
+            <ThreeScene />
 
             {/* ── WAYPOINT OVERLAY ─────────────────────────────────────
                 This canvas stays on top. Do not remove it.
@@ -732,38 +732,6 @@ export default function DispatcherPage() {
   )
 }
 
-// ─── Three.js placeholder ────────────────────────────────────────────
-// DELETE this entire component once Three.js is integrated.
-// Your <ThreeJsScene /> should be position:absolute, inset:0, z-index:0.
-function ThreeJsPlaceholder() {
-  return (
-    <div style={{
-      position: 'absolute', inset: 0, zIndex: 0,
-      background: '#050505',
-      display: 'flex', flexDirection: 'column',
-      alignItems: 'center', justifyContent: 'center',
-      gap: '12px',
-    }}>
-      {/* Dot grid */}
-      <div className="tac-bg" style={{ position: 'absolute', inset: 0, opacity: 0.6 }} />
-
-      <div style={{ position: 'relative', textAlign: 'center' }}>
-        <div className="font-display" style={{
-          fontSize: '11px', fontWeight: 700, color: '#1a1a1a',
-          letterSpacing: '0.3em', marginBottom: '8px',
-        }}>
-          THREE.JS INTEGRATION POINT
-        </div>
-        <div className="font-mono" style={{ fontSize: '9px', color: '#111', letterSpacing: '0.15em', lineHeight: 1.8 }}>
-          /odin1/cloud_slam → PointCloud2<br />
-          /odin1/odometry → FF position<br />
-          /odin1/path → breadcrumb trail<br />
-          /slam_cloud_accumulator/map → floor map
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ─── Sub-components ───────────────────────────────────────────────────
 
