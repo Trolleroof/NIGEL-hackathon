@@ -9,19 +9,6 @@ const BOUNDS = { xMin: 82, xMax: 818, yMin: 52, yMax: 448 }
 const STATUSES = ['OK', 'Searching', 'Victim Found', 'Need Help'] as const
 type StatusType = typeof STATUSES[number]
 
-const FAKE_TRANSCRIPTS = [
-  'Hallway is clear, moving to your marker.',
-  "Smoke's getting heavy. Visibility dropping.",
-  'Copy that. On my way.',
-  'There is a door here. Checking if blocked.',
-  'Can hear something. Hold on.',
-  'Moving through the corridor now.',
-  'Structural damage visible on east side.',
-  'Civilian located. Requesting guidance.',
-  'I see the marker. Almost there.',
-  "Air is thicker here. Slowing down.",
-]
-
 function statusColor(s: StatusType) {
   if (s === 'OK') return '#22c55e'
   if (s === 'Searching') return '#eab308'
@@ -93,6 +80,12 @@ export default function FirefighterPage() {
   const ffPosRef = useRef(ffPos)
   ffPosRef.current = ffPos
 
+  // ── Speech-to-Text refs ──
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null)
+  const finalTranscriptRef = useRef('')
+  const [interimText, setInterimText] = useState('')
+
   // Poll state
   useEffect(() => {
     const poll = async () => {
@@ -132,7 +125,7 @@ export default function FirefighterPage() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ type: 'firefighter_position_update', position: newPos }),
-        }).catch(() => {})
+        }).catch(() => { })
       }
     }
 
@@ -160,27 +153,84 @@ export default function FirefighterPage() {
     })
   }, [status])
 
-  // Hold-to-transmit
+  // ── Real Speech-to-Text for Hold-to-Transmit ──
   const startHold = useCallback(() => {
     setTransmitting(true)
-    holdTimer.current = setTimeout(() => {
-      setLastMsg('TRANSMITTING...')
-    }, 200)
+    setInterimText('')
+    finalTranscriptRef.current = ''
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any
+    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition
+    if (!SpeechRecognitionAPI) {
+      // Fallback: just show transmitting indicator
+      holdTimer.current = setTimeout(() => {
+        setLastMsg('TRANSMITTING...')
+      }, 200)
+      return
+    }
+
+    const recognition = new SpeechRecognitionAPI()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      let interim = ''
+      let final = ''
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i]
+        if (result.isFinal) {
+          final += result[0].transcript
+        } else {
+          interim += result[0].transcript
+        }
+      }
+      finalTranscriptRef.current = final
+      setInterimText(interim)
+      setLastMsg(final + interim || 'LISTENING...')
+    }
+
+    recognition.onerror = () => {
+      setTransmitting(false)
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
   }, [])
 
   const endHold = useCallback(async () => {
     if (holdTimer.current) clearTimeout(holdTimer.current)
+
+    // Stop recognition
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+      recognitionRef.current = null
+    }
+
     if (!transmitting) return
     setTransmitting(false)
-    const msg = FAKE_TRANSCRIPTS[Math.floor(Math.random() * FAKE_TRANSCRIPTS.length)]
-    setLastMsg(msg)
-    await fetch('/api/state', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'firefighter_voice_message', message: `[VOICE] ${msg}` }),
-    })
+
+    // Wait for final results
+    await new Promise(r => setTimeout(r, 300))
+
+    const transcript = (finalTranscriptRef.current || interimText).trim()
+    setInterimText('')
+
+    if (transcript && transcript !== 'LISTENING...' && transcript !== 'TRANSMITTING...') {
+      setLastMsg(transcript)
+      await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'firefighter_voice_message', message: `[VOICE] ${transcript}` }),
+      })
+    } else {
+      setLastMsg('')
+    }
+
     setTimeout(() => setLastMsg(''), 4000)
-  }, [transmitting])
+  }, [transmitting, interimText])
 
   // Compute arrow angle and distance
   const angle = waypoint
@@ -324,7 +374,7 @@ export default function FirefighterPage() {
             animation: isNeedHelp ? 'need-help-flash 0.5s infinite' : 'none',
             WebkitTapHighlightColor: 'transparent',
           }}
-          onTouchStart={() => {}}
+          onTouchStart={() => { }}
         >
           <div style={{
             width: '20px', height: '20px', borderRadius: '50%',
@@ -396,6 +446,17 @@ export default function FirefighterPage() {
           <div className="font-mono" style={{ fontSize: '8px', color: '#222', letterSpacing: '0.1em' }}>
             HOLD TO TALK
           </div>
+
+          {/* Live transcript indicator */}
+          {transmitting && (interimText || finalTranscriptRef.current) && (
+            <div className="font-mono" style={{
+              fontSize: '8px', color: '#ff3131', maxWidth: '140px',
+              textAlign: 'center', marginTop: '4px',
+              fontStyle: 'italic', opacity: 0.8,
+            }}>
+              {finalTranscriptRef.current}{interimText}
+            </div>
+          )}
         </button>
       </div>
     </div>

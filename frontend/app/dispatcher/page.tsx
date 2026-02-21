@@ -172,6 +172,13 @@ export default function DispatcherPage() {
     return Math.min(Math.max(nextWidth, MIN_LEFT_PANEL_WIDTH), maxWidth)
   }, [])
 
+  // ── Speech-to-Text state ──
+  const [isRecording, setIsRecording] = useState(false)
+  const [interimText, setInterimText] = useState('')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null)
+  const finalTranscriptRef = useRef('')
+
   // Clock + tick
   useEffect(() => {
     startRef.current = Date.now()
@@ -333,6 +340,74 @@ export default function DispatcherPage() {
     })
   }
 
+  // ── Speech Recognition helpers ──
+  const startRecording = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any
+    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition
+    if (!SpeechRecognitionAPI) {
+      console.error('SpeechRecognition not supported in this browser')
+      return
+    }
+
+    const recognition = new SpeechRecognitionAPI()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+
+    finalTranscriptRef.current = ''
+    setInterimText('')
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      let interim = ''
+      let final = ''
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i]
+        if (result.isFinal) {
+          final += result[0].transcript
+        } else {
+          interim += result[0].transcript
+        }
+      }
+      finalTranscriptRef.current = final
+      setInterimText(interim)
+    }
+
+    recognition.onerror = () => {
+      setIsRecording(false)
+    }
+
+    recognition.onend = () => {
+      setIsRecording(false)
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+    setIsRecording(true)
+  }, [])
+
+  const stopRecording = useCallback(async () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+    }
+    setIsRecording(false)
+
+    // Wait a moment to let final results settle
+    await new Promise(r => setTimeout(r, 300))
+
+    const transcript = (finalTranscriptRef.current || interimText).trim()
+    setInterimText('')
+
+    if (transcript) {
+      await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'dispatcher_voice_message', message: transcript }),
+      })
+    }
+  }, [interimText])
+
   const fmtElapsed = (s: number) => {
     const m = Math.floor(s / 60).toString().padStart(2, '0')
     const ss = (s % 60).toString().padStart(2, '0')
@@ -374,7 +449,7 @@ export default function DispatcherPage() {
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
           </div>
-       
+
           <Link href="/" className="font-mono" style={{
             fontSize: '9px', color: '#333', textDecoration: 'none', letterSpacing: '0.1em',
           }}>← HOME</Link>
@@ -512,7 +587,82 @@ export default function DispatcherPage() {
 
         {/* Right: Radio Log */}
         <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-          <div className="panel-header">RADIO LOG</div>
+          <div className="panel-header" style={{ justifyContent: 'space-between' }}>
+            <span>RADIO LOG</span>
+            {/* ── Mic Button ── */}
+            <button
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onMouseLeave={() => { if (isRecording) stopRecording() }}
+              className="font-mono"
+              style={{
+                background: isRecording ? '#2a0000' : 'transparent',
+                border: `1px solid ${isRecording ? '#ff3131' : '#2a2a2a'}`,
+                borderRadius: '3px',
+                color: isRecording ? '#ff3131' : '#666',
+                fontSize: '8px',
+                padding: '3px 8px',
+                cursor: 'pointer',
+                letterSpacing: '0.1em',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                boxShadow: isRecording ? '0 0 8px rgba(255,49,49,0.4)' : 'none',
+              }}
+            >
+              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
+                <rect x="3" y="0" width="4" height="7" rx="2"
+                  fill={isRecording ? '#ff3131' : '#666'}
+                  style={{ transition: 'fill 0.15s' }}
+                />
+                <path d="M1 6 Q1 10 5 10 Q9 10 9 6"
+                  stroke={isRecording ? '#ff3131' : '#666'}
+                  strokeWidth="1" fill="none"
+                  style={{ transition: 'stroke 0.15s' }}
+                />
+                <line x1="5" y1="10" x2="5" y2="13"
+                  stroke={isRecording ? '#ff3131' : '#666'}
+                  strokeWidth="1"
+                  style={{ transition: 'stroke 0.15s' }}
+                />
+              </svg>
+              {isRecording ? 'LIVE' : 'HOLD'}
+            </button>
+          </div>
+
+          {/* Interim transcript preview */}
+          {isRecording && (
+            <div style={{
+              padding: '6px 8px',
+              borderBottom: '1px solid #1a1a1a',
+              background: '#0a0000',
+            }}>
+              <div className="font-mono" style={{
+                fontSize: '8px', color: '#ff3131', letterSpacing: '0.1em',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}>
+                <span style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: '#ff3131',
+                  animation: 'pulse-dot 1s infinite',
+                  flexShrink: 0,
+                }} />
+                TRANSMITTING
+              </div>
+              {(interimText || finalTranscriptRef.current) && (
+                <div className="font-mono" style={{
+                  fontSize: '9px', color: '#c0c0c0', marginTop: '4px',
+                  fontStyle: 'italic',
+                }}>
+                  {finalTranscriptRef.current}{interimText}
+                </div>
+              )}
+            </div>
+          )}
+
+
           <div
             ref={logRef}
             style={{
@@ -650,11 +800,11 @@ function HBtn({ onClick, label, dim }: { onClick: () => void; label: string; dim
       }}
       onMouseEnter={e => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = '#ff3131'
-        ;(e.currentTarget as HTMLButtonElement).style.color = '#ff3131'
+          ; (e.currentTarget as HTMLButtonElement).style.color = '#ff3131'
       }}
       onMouseLeave={e => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = dim ? '#1a1a1a' : '#2a2a2a'
-        ;(e.currentTarget as HTMLButtonElement).style.color = dim ? '#333' : '#a0a0a0'
+          ; (e.currentTarget as HTMLButtonElement).style.color = dim ? '#333' : '#a0a0a0'
       }}
     >
       {label}
@@ -774,7 +924,7 @@ function FeedViewport({
     if (!el || feed.kind !== 'live') return
     if (liveStream) {
       el.srcObject = liveStream
-      void el.play().catch(() => {})
+      void el.play().catch(() => { })
       return
     }
     el.srcObject = null
@@ -786,7 +936,7 @@ function FeedViewport({
     el.muted = true
     el.defaultMuted = true
     el.volume = 0
-    void el.play().catch(() => {})
+    void el.play().catch(() => { })
   }, [feed.kind, feed.src])
 
   if (feed.kind === 'live') {
