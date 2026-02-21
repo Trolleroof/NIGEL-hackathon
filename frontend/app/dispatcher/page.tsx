@@ -14,7 +14,7 @@ const MIN_LEFT_PANEL_WIDTH = 280
 const MIN_RIGHT_PANEL_WIDTH = 220
 const MIN_CENTER_PANEL_WIDTH = 460
 
-const RADIO_FILTERS = ['ALL', 'DISPATCH', 'FF1', 'SYSTEM'] as const
+const RADIO_FILTERS = ['ALL', 'DISPATCH', 'FF1', 'NIGEL', 'SYSTEM'] as const
 type RadioFilter = (typeof RADIO_FILTERS)[number]
 
 const QUICK_RADIO_MACROS = [
@@ -25,13 +25,30 @@ const QUICK_RADIO_MACROS = [
 
 // ─── Types ──────────────────────────────────────────────────────────
 interface Pos { x: number; y: number }
-interface Msg { id: number; from: string; message: string; timestamp: string }
+interface Msg {
+  id: number
+  from: string
+  message: string
+  timestamp: string
+  severity?: 'normal' | 'warning' | 'critical'
+  shouldSpeak?: boolean
+}
+interface Hazard { id: string; position: Pos; type: string; label: string; active: boolean }
+interface MissionTask { id: string; description: string; priority: 'low' | 'medium' | 'high'; completed: boolean; createdAt: string }
+interface Alert { id: string; message: string; level: 'info' | 'warning' | 'critical'; acknowledged: boolean; createdAt: string }
 interface State {
   firefighterPosition: Pos
   waypoint: Pos | null
   radioLog: Msg[]
   firefighterStatus: string
   breadcrumbs: Pos[]
+  hazards: Hazard[]
+  tasks: MissionTask[]
+  alerts: Alert[]
+  airSupply: number
+  roomsCleared: string[]
+  missionStartTime: string
+  agentProcessing: boolean
 }
 
 type FeedKind = 'video' | 'live'
@@ -64,15 +81,25 @@ function statusColor(s: string) {
 
 function fromColor(from: string) {
   if (from === 'DISPATCH') return '#ff3131'
+  if (from === 'NIGEL') return '#00bfff'
   if (from === 'SYSTEM') return '#4d4d4d'
   return '#a0a0a0'
 }
 
-function classifyRadioSeverity(message: string) {
-  const normalized = message.toLowerCase()
+function classifyRadioSeverity(msg: Msg) {
+  if (msg.from === 'NIGEL' && msg.severity) return msg.severity
+  const normalized = msg.message.toLowerCase()
   if (/mayday|collapse|bomb|trapped|man down|evacuate now|flashover/.test(normalized)) return 'critical'
   if (/smoke|low air|heat|injur|lost|help|victim/.test(normalized)) return 'warning'
   return 'normal'
+}
+
+function fireAgent(trigger: 'radio_message' | 'heartbeat' | 'status_change', message?: string, newStatus?: string) {
+  fetch('/api/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trigger, message, newStatus }),
+  }).catch(() => {})
 }
 
 // ─── Canvas draw ─────────────────────────────────────────────────────
@@ -83,7 +110,6 @@ function drawMap(
   dragWaypoint: Pos | null,
   tick: number,
 ) {
-  // Transparent clear — background is owned by Three.js
   ctx.clearRect(0, 0, CW, CH)
 
   // Breadcrumbs
@@ -96,7 +122,40 @@ function drawMap(
     ctx.fill()
   }
 
-  // Waypoint preview (mouse hover)
+  // ── Hazard markers ──
+  for (const hazard of (state.hazards ?? [])) {
+    if (!hazard.active) continue
+    const { x, y } = hazard.position
+    const pulse = 0.5 + 0.5 * Math.sin(tick * 0.06)
+
+    ctx.beginPath()
+    ctx.arc(x, y, 18 + pulse * 4, 0, Math.PI * 2)
+    ctx.strokeStyle = `rgba(255,165,0,${0.2 * pulse})`
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+
+    ctx.beginPath()
+    ctx.arc(x, y, 10, 0, Math.PI * 2)
+    ctx.fillStyle = `rgba(255,165,0,${0.3 + 0.2 * pulse})`
+    ctx.fill()
+    ctx.strokeStyle = `rgba(255,165,0,0.7)`
+    ctx.lineWidth = 1.5
+    ctx.stroke()
+
+    ctx.fillStyle = '#fff'
+    ctx.font = 'bold 12px "Space Mono", monospace'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('!', x, y)
+
+    ctx.font = '7px "Space Mono", monospace'
+    ctx.fillStyle = '#ffa500'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillText(hazard.label.toUpperCase().slice(0, 20), x + 14, y - 6)
+  }
+
+  // Waypoint preview
   if (waypointPreview) {
     ctx.strokeStyle = 'rgba(255,49,49,0.3)'
     ctx.lineWidth = 1
@@ -125,15 +184,14 @@ function drawMap(
     ctx.arc(x, y, 6, 0, Math.PI * 2)
     ctx.strokeStyle = `rgba(255,49,49,${pulse * 0.8})`
     ctx.stroke()
-    // outer ring
     ctx.beginPath()
     ctx.arc(x, y, 16 + Math.sin(tick * 0.1) * 3, 0, Math.PI * 2)
     ctx.strokeStyle = `rgba(255,49,49,${0.2 * pulse})`
     ctx.stroke()
-    // label
     ctx.font = '8px "Space Mono", monospace'
     ctx.fillStyle = '#ff3131'
     ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
     ctx.fillText('TARGET', x + 10, y - 10)
   }
 
@@ -148,17 +206,16 @@ function drawMap(
   ctx.fill()
   ctx.shadowBlur = 0
 
-  // FF direction ring
   ctx.strokeStyle = `rgba(255,49,49,0.4)`
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.arc(x, y, 12, 0, Math.PI * 2)
   ctx.stroke()
 
-  // FF label
   ctx.fillStyle = '#fff'
   ctx.font = 'bold 9px "Space Mono", monospace'
   ctx.textAlign = 'left'
+  ctx.textBaseline = 'alphabetic'
   ctx.fillText('FF1', x + 14, y + 4)
 
   ctx.textAlign = 'left'
@@ -170,6 +227,8 @@ export default function DispatcherPage() {
   const [state, setState] = useState<State>({
     firefighterPosition: { x: 435, y: 400 },
     waypoint: null, radioLog: [], firefighterStatus: 'OK', breadcrumbs: [],
+    hazards: [], tasks: [], alerts: [], airSupply: 100, roomsCleared: [],
+    missionStartTime: new Date().toISOString(), agentProcessing: false,
   })
   const [waypointPreview, setWaypointPreview] = useState<Pos | null>(null)
   const [dragWaypoint, setDragWaypoint] = useState<Pos | null>(null)
@@ -203,6 +262,7 @@ export default function DispatcherPage() {
   const skipCanvasClickRef = useRef(false)
   const dragWaypointRef = useRef<Pos | null>(null)
   const isDraggingWaypointRef = useRef(false)
+  const lastSpokenIdRef = useRef(0)
   const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
 
   const clampLeftPanelWidth = useCallback((nextWidth: number) => {
@@ -253,6 +313,32 @@ export default function DispatcherPage() {
     }
     poll()
     const id = setInterval(poll, 300)
+    return () => clearInterval(id)
+  }, [])
+
+  // ── TTS for NIGEL messages (ElevenLabs, fallback to browser) ──
+  useEffect(() => {
+    const log = state.radioLog
+    if (!log.length) return
+
+    const newNigelMessages = log.filter(
+      msg => msg.from === 'NIGEL' && msg.id > lastSpokenIdRef.current && msg.shouldSpeak !== false
+    )
+
+    void (async () => {
+      for (const msg of newNigelMessages) {
+        lastSpokenIdRef.current = msg.id
+        const { speakText } = await import('@/lib/tts')
+        await speakText(msg.message)
+      }
+    })()
+  }, [state.radioLog])
+
+  // ── Heartbeat timer (every 45s) ──
+  useEffect(() => {
+    const id = setInterval(() => {
+      fireAgent('heartbeat')
+    }, 45000)
     return () => clearInterval(id)
   }, [])
 
@@ -420,7 +506,7 @@ export default function DispatcherPage() {
 
   const criticalRadioCount = useMemo(() => (
     filteredRadioLog.reduce((count, msg) => (
-      classifyRadioSeverity(msg.message) === 'critical' ? count + 1 : count
+      classifyRadioSeverity(msg) === 'critical' ? count + 1 : count
     ), 0)
   ), [filteredRadioLog])
 
@@ -563,6 +649,7 @@ export default function DispatcherPage() {
       })
       setRadioDraft('')
       setRadioAutoFollow(true)
+      fireAgent('radio_message', message)
     } catch {
       // Ignore temporary network errors in demo UI.
     }
@@ -634,7 +721,6 @@ export default function DispatcherPage() {
     }
     setIsRecording(false)
 
-    // Wait a moment to let final results settle
     await new Promise(r => setTimeout(r, 300))
 
     const transcript = (finalTranscriptRef.current || interimText).trim()
@@ -647,14 +733,36 @@ export default function DispatcherPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'dispatcher_voice_message', message: transcript }),
       })
+      fireAgent('radio_message', transcript)
     }
   }, [interimText])
+
+  const acknowledgeAlert = useCallback(async (alertId: string) => {
+    await fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'agent_acknowledge_alert', alertId }),
+    })
+  }, [])
 
   const fmtElapsed = (s: number) => {
     const m = Math.floor(s / 60).toString().padStart(2, '0')
     const ss = (s % 60).toString().padStart(2, '0')
     return `${m}:${ss}`
   }
+
+  const unackedCriticalAlerts = useMemo(() =>
+    (state.alerts ?? []).filter(a => a.level === 'critical' && !a.acknowledged),
+    [state.alerts]
+  )
+  const activeHazards = useMemo(() =>
+    (state.hazards ?? []).filter(h => h.active),
+    [state.hazards]
+  )
+  const openTasks = useMemo(() =>
+    (state.tasks ?? []).filter(t => !t.completed),
+    [state.tasks]
+  )
 
   return (
     <div style={{
@@ -680,6 +788,15 @@ export default function DispatcherPage() {
           }}>
             Nigel
           </span>
+          {state.agentProcessing && (
+            <span style={{
+              width: '6px', height: '6px', borderRadius: '50%',
+              background: '#00bfff',
+              boxShadow: '0 0 8px #00bfff',
+              animation: 'pulse-dot 0.6s infinite',
+              flexShrink: 0,
+            }} title="NIGEL is thinking..." />
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '18px', flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
@@ -687,7 +804,20 @@ export default function DispatcherPage() {
             <Stat label="ELAPSED" value={fmtElapsed(elapsed)} accent />
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
+            <Stat label="AIR" value={`${state.airSupply ?? 100}%`}
+              valueColor={(state.airSupply ?? 100) <= 25 ? '#ff3131' : (state.airSupply ?? 100) <= 50 ? '#eab308' : '#22c55e'} />
+            <Stat label="CLEARED" value={`${(state.roomsCleared ?? []).length}`} />
           </div>
+          <Link href="/threejs-cloud" className="font-mono" style={{
+            textDecoration: 'none',
+            border: '1px solid #2a2a2a',
+            color: '#ff3131',
+            padding: '5px 9px',
+            fontSize: '8px',
+            letterSpacing: '0.1em',
+          }}>
+            THREE.JS CLOUD
+          </Link>
           <Link href="/" aria-label="Home" style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             color: '#333', textDecoration: 'none', width: 28, height: 28,
@@ -699,6 +829,53 @@ export default function DispatcherPage() {
           </Link>
         </div>
       </div>
+
+      {/* ── Critical Alert Banner ── */}
+      {unackedCriticalAlerts.length > 0 && (
+        <div style={{
+          flexShrink: 0,
+          background: 'rgba(255,0,0,0.15)',
+          borderBottom: '1px solid #ff3131',
+          padding: '6px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          animation: 'alert-flash 1s infinite',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+            <span style={{
+              width: '8px', height: '8px', borderRadius: '50%',
+              background: '#ff3131', flexShrink: 0,
+              animation: 'pulse-dot 0.5s infinite',
+            }} />
+            <span className="font-mono" style={{
+              fontSize: '9px', color: '#ff3131', letterSpacing: '0.1em', fontWeight: 700,
+            }}>
+              CRITICAL: {unackedCriticalAlerts[0].message}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="font-mono"
+            onClick={() => void acknowledgeAlert(unackedCriticalAlerts[0].id)}
+            style={{
+              border: '1px solid #ff3131',
+              background: 'rgba(255,49,49,0.2)',
+              color: '#ff3131',
+              padding: '3px 10px',
+              fontSize: '8px',
+              letterSpacing: '0.1em',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            ACK
+          </button>
+        </div>
+      )}
 
       {/* ── Body ── */}
       <div style={{
@@ -885,7 +1062,7 @@ export default function DispatcherPage() {
           </div>
         </div>
 
-        {/* Right: Radio Log */}
+        {/* Right: Radio Log + Mission Intel */}
         <div style={{ position: 'relative', minHeight: 0 }}>
           {!isCompactLayout && (
             <button
@@ -1004,6 +1181,7 @@ export default function DispatcherPage() {
             }}>
               {RADIO_FILTERS.map(filter => {
                 const active = filter === radioFilter
+                const isNigel = filter === 'NIGEL'
                 return (
                   <button
                     key={filter}
@@ -1014,9 +1192,9 @@ export default function DispatcherPage() {
                       setRadioAutoFollow(true)
                     }}
                     style={{
-                      border: `1px solid ${active ? '#ff3131' : '#2a2a2a'}`,
-                      color: active ? '#ff3131' : '#777',
-                      background: active ? 'rgba(255,49,49,0.08)' : 'transparent',
+                      border: `1px solid ${active ? (isNigel ? '#00bfff' : '#ff3131') : '#2a2a2a'}`,
+                      color: active ? (isNigel ? '#00bfff' : '#ff3131') : '#777',
+                      background: active ? (isNigel ? 'rgba(0,191,255,0.08)' : 'rgba(255,49,49,0.08)') : 'transparent',
                       padding: '3px 6px',
                       fontSize: '7px',
                       letterSpacing: '0.08em',
@@ -1043,7 +1221,7 @@ export default function DispatcherPage() {
               }}
             >
               {filteredRadioLog.map(msg => {
-                const severity = classifyRadioSeverity(msg.message)
+                const severity = classifyRadioSeverity(msg)
                 const severityColor =
                   severity === 'critical' ? '#ff3131' :
                     severity === 'warning' ? '#eab308' : '#2a2a2a'
@@ -1199,6 +1377,72 @@ export default function DispatcherPage() {
                   </button>
                 ))}
               </div>
+
+              {/* ── MISSION INTEL ── */}
+              <div style={{
+                borderTop: '1px solid #1a1a1a',
+                paddingTop: '8px',
+                marginTop: '4px',
+              }}>
+                <div className="font-mono" style={{
+                  fontSize: '8px', color: '#00bfff', letterSpacing: '0.12em',
+                  fontWeight: 700, marginBottom: '6px',
+                }}>
+                  MISSION INTEL
+                </div>
+
+                {activeHazards.length > 0 && (
+                  <div style={{ marginBottom: '6px' }}>
+                    <div className="font-mono" style={{ fontSize: '7px', color: '#666', letterSpacing: '0.1em', marginBottom: '3px' }}>
+                      HAZARDS ({activeHazards.length})
+                    </div>
+                    {activeHazards.map(h => (
+                      <div key={h.id} style={{
+                        borderLeft: '2px solid #ffa500',
+                        padding: '3px 6px',
+                        marginBottom: '3px',
+                        background: 'rgba(255,165,0,0.05)',
+                      }}>
+                        <span className="font-mono" style={{ fontSize: '8px', color: '#ffa500' }}>
+                          {h.type.toUpperCase()}: {h.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {openTasks.length > 0 && (
+                  <div style={{ marginBottom: '6px' }}>
+                    <div className="font-mono" style={{ fontSize: '7px', color: '#666', letterSpacing: '0.1em', marginBottom: '3px' }}>
+                      TASKS ({openTasks.length})
+                    </div>
+                    {openTasks.map(t => {
+                      const borderColor = t.priority === 'high' ? '#ff3131' : t.priority === 'medium' ? '#eab308' : '#666'
+                      return (
+                        <div key={t.id} style={{
+                          borderLeft: `2px solid ${borderColor}`,
+                          padding: '3px 6px',
+                          marginBottom: '3px',
+                          background: 'rgba(255,255,255,0.02)',
+                        }}>
+                          <span className="font-mono" style={{ fontSize: '8px', color: '#c0c0c0' }}>
+                            {t.description}
+                          </span>
+                          <span className="font-mono" style={{ fontSize: '7px', color: borderColor, marginLeft: '6px', letterSpacing: '0.08em' }}>
+                            {t.priority.toUpperCase()}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+
+                {activeHazards.length === 0 && openTasks.length === 0 && (
+                  <div className="font-mono" style={{ fontSize: '7px', color: '#333', letterSpacing: '0.1em' }}>
+                    NO ACTIVE INTEL
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1241,6 +1485,13 @@ export default function DispatcherPage() {
           </div>
         </div>
       )}
+
+      <style>{`
+        @keyframes alert-flash {
+          0%, 100% { background: rgba(255,0,0,0.1); }
+          50% { background: rgba(255,0,0,0.2); }
+        }
+      `}</style>
     </div>
   )
 }

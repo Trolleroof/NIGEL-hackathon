@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState, useCallback, useRef } from 'react'
 import Link from 'next/link'
+import ThreeScene from '@/components/three-scene'
 
 // ─── Constants ───────────────────────────────────────────────────────
 const STEP = 10
@@ -20,8 +21,17 @@ function statusColor(s: StatusType) {
 
 function fromColor(from: string) {
   if (from === 'DISPATCH') return '#ff3131'
+  if (from === 'NIGEL') return '#00bfff'
   if (from === 'SYSTEM') return '#444'
   return '#a0a0a0'
+}
+
+function fireAgent(trigger: 'radio_message' | 'heartbeat' | 'status_change', message?: string, newStatus?: string) {
+  fetch('/api/agent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trigger, message, newStatus }),
+  }).catch(() => {})
 }
 
 // ─── Mini-map canvas draw ─────────────────────────────────────────────
@@ -44,12 +54,12 @@ function drawMiniMap(
 ) {
   ctx.clearRect(0, 0, CW, CH)
 
-  // Background
-  ctx.fillStyle = '#111'
+  // Dim layer to keep overlay readable above live point cloud
+  ctx.fillStyle = 'rgba(6,6,6,0.5)'
   ctx.fillRect(0, 0, CW, CH)
 
   // Grid
-  ctx.fillStyle = '#1c1c1c'
+  ctx.fillStyle = 'rgba(120,120,120,0.25)'
   for (let x = 0; x < CW; x += 30) {
     for (let y = 0; y < CH; y += 30) {
       ctx.fillRect(x, y, 1, 1)
@@ -57,11 +67,11 @@ function drawMiniMap(
   }
 
   // Floor
-  ctx.fillStyle = '#151515'
+  ctx.fillStyle = 'rgba(0,0,0,0.26)'
   ctx.fillRect(81, 51, 738, 398)
 
   // Walls
-  ctx.strokeStyle = '#6b1515'
+  ctx.strokeStyle = 'rgba(163,33,33,0.85)'
   ctx.lineWidth = 2
   ctx.lineCap = 'square'
   for (const [x1, y1, x2, y2] of WALLS) {
@@ -156,7 +166,7 @@ function CamThumb() {
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────
-interface Msg { id: number; from: string; message: string; timestamp: string }
+interface Msg { id: number; from: string; message: string; timestamp: string; shouldSpeak?: boolean }
 
 export default function FirefighterPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -212,6 +222,22 @@ export default function FirefighterPage() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
   }, [radioLog.length])
 
+  // ── TTS for NIGEL messages (ElevenLabs, fallback to browser) ──
+  const lastSpokenIdRef = useRef(0)
+  useEffect(() => {
+    if (!radioLog.length) return
+    const newNigelMessages = radioLog.filter(
+      msg => msg.from === 'NIGEL' && msg.id > lastSpokenIdRef.current && msg.shouldSpeak !== false
+    )
+    void (async () => {
+      for (const msg of newNigelMessages) {
+        lastSpokenIdRef.current = msg.id
+        const { speakText } = await import('@/lib/tts')
+        await speakText(msg.message)
+      }
+    })()
+  }, [radioLog])
+
   // Draw mini-map
   useEffect(() => {
     const canvas = canvasRef.current
@@ -258,6 +284,7 @@ export default function FirefighterPage() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'firefighter_status_update', status: next }),
     })
+    fireAgent('status_change', undefined, next)
   }, [status])
 
   // ── Real Speech-to-Text for Hold-to-Transmit ──
@@ -335,6 +362,7 @@ export default function FirefighterPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'firefighter_voice_message', message: `[VOICE] ${transcript}` }),
       })
+      fireAgent('radio_message', transcript)
     } else {
       setLastMsg('')
     }
@@ -419,11 +447,19 @@ export default function FirefighterPage() {
 
       {/* ── Mini-map ── */}
       <div style={{ flex: 4, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
+        <ThreeScene showOverlay={false} />
         <canvas
           ref={canvasRef}
           width={CW}
           height={CH}
-          style={{ width: '100%', height: '100%', display: 'block' }}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            display: 'block',
+            background: 'transparent',
+          }}
         />
         {/* On-target overlay */}
         {onTarget && (

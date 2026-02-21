@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 
 interface Position { x: number; y: number }
-interface RadioMessage { id: number; from: string; message: string; timestamp: string; severity?: 'normal' | 'warning' | 'critical' }
+interface RadioMessage { id: number; from: string; message: string; timestamp: string; severity?: 'normal' | 'warning' | 'critical'; shouldSpeak?: boolean }
 interface Hazard { id: string; position: Position; type: 'fire' | 'smoke' | 'collapse' | 'chemical' | 'other'; label: string; active: boolean }
 interface Task { id: string; description: string; priority: 'low' | 'medium' | 'high'; completed: boolean; createdAt: string }
 interface Alert { id: string; message: string; level: 'info' | 'warning' | 'critical'; acknowledged: boolean; createdAt: string }
@@ -184,6 +184,7 @@ export async function POST(request: Request) {
         message: body.message,
         timestamp: ts(),
         severity: body.severity ?? 'normal',
+        shouldSpeak: body.shouldSpeak ?? true,
       })
       trimLog(state)
       break
