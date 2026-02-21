@@ -12,6 +12,28 @@ export interface PointCloudData {
   timestamp: number;
 }
 
+export interface OdometryData {
+  x: number;
+  y: number;
+  z: number;
+  qx: number;
+  qy: number;
+  qz: number;
+  qw: number;
+  timestamp: number;
+}
+
+export interface PathData {
+  pointCount: number;
+  positions: Float32Array;
+  timestamp: number;
+}
+
+export interface ImageData {
+  jpegBlob: Blob;
+  timestamp: number;
+}
+
 type BinaryFrameType = 'PTCL' | 'IMAG' | 'ODOM' | 'PATH' | 'UNKNOWN';
 
 export interface WebSocketManagerConfig {
@@ -20,7 +42,11 @@ export interface WebSocketManagerConfig {
   autoReconnect?: boolean;
   reconnectInterval?: number;
   maxReconnectAttempts?: number;
-  onMessage?: (data: PointCloudData) => void;
+  onPointCloud?: (data: PointCloudData) => void;
+  onOdometry?: (data: OdometryData) => void;
+  onPath?: (data: PathData) => void;
+  onImage?: (data: ImageData) => void;
+  onMessage?: (data: PointCloudData) => void; // deprecated, use onPointCloud
   onStatusChange?: (status: ConnectionStatus) => void;
   onError?: (error: Event) => void;
 }
@@ -37,6 +63,10 @@ export class WebSocketManager {
       autoReconnect: true,
       reconnectInterval: 3000,
       maxReconnectAttempts: 10,
+      onPointCloud: config.onMessage || (() => {}), // backward compatibility
+      onOdometry: () => {},
+      onPath: () => {},
+      onImage: () => {},
       onMessage: () => {},
       onStatusChange: () => {},
       onError: () => {},
@@ -115,13 +145,35 @@ export class WebSocketManager {
     if (!buffer) return;
 
     const frameType = this.getBinaryFrameType(buffer);
-    if (frameType !== 'PTCL') return;
 
     try {
-      const pointCloudData = this.parsePointCloudMessage(buffer);
-      this.config.onMessage(pointCloudData);
+      switch (frameType) {
+        case 'PTCL': {
+          const data = this.parsePointCloudMessage(buffer);
+          this.config.onPointCloud?.(data);
+          this.config.onMessage?.(data); // backward compatibility
+          break;
+        }
+        case 'ODOM': {
+          const data = this.parseOdometryMessage(buffer);
+          this.config.onOdometry?.(data);
+          break;
+        }
+        case 'PATH': {
+          const data = this.parsePathMessage(buffer);
+          this.config.onPath?.(data);
+          break;
+        }
+        case 'IMAG': {
+          const data = this.parseImageMessage(buffer);
+          this.config.onImage?.(data);
+          break;
+        }
+        default:
+          console.warn(`Unknown frame type: ${frameType}`);
+      }
     } catch (error) {
-      console.error('Failed to parse point cloud message:', error);
+      console.error(`Failed to parse ${frameType} message:`, error);
     }
   }
 
@@ -268,6 +320,137 @@ export class WebSocketManager {
       pointCount,
       positions,
       colors,
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * Parse binary odometry message with 'ODOM' format
+   *
+   * Format:
+   * [0..3]    char[4]     'ODOM' (magic bytes)
+   * [4..7]    float32     x (position, metres)
+   * [8..11]   float32     y
+   * [12..15]  float32     z
+   * [16..19]  float32     qx (orientation quaternion)
+   * [20..23]  float32     qy
+   * [24..27]  float32     qz
+   * [28..31]  float32     qw
+   */
+  private parseOdometryMessage(buffer: ArrayBuffer): OdometryData {
+    const view = new DataView(buffer);
+
+    // Verify magic bytes 'ODOM'
+    const magic = String.fromCharCode(
+      view.getUint8(0),
+      view.getUint8(1),
+      view.getUint8(2),
+      view.getUint8(3)
+    );
+
+    if (magic !== 'ODOM') {
+      throw new Error(`Invalid magic bytes: expected 'ODOM', got '${magic}'`);
+    }
+
+    // Validate buffer size (32 bytes fixed)
+    if (buffer.byteLength < 32) {
+      throw new Error(
+        `Buffer size mismatch: expected 32 bytes, got ${buffer.byteLength}`
+      );
+    }
+
+    return {
+      x: view.getFloat32(4, true),
+      y: view.getFloat32(8, true),
+      z: view.getFloat32(12, true),
+      qx: view.getFloat32(16, true),
+      qy: view.getFloat32(20, true),
+      qz: view.getFloat32(24, true),
+      qw: view.getFloat32(28, true),
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * Parse binary path message with 'PATH' format
+   *
+   * Format:
+   * [0..3]       char[4]     'PATH' (magic bytes)
+   * [4..7]       uint32      Pose count N
+   * [8..8+N*12)  float32[]   XYZ positions (x0,y0,z0 … xn,yn,zn)
+   */
+  private parsePathMessage(buffer: ArrayBuffer): PathData {
+    const view = new DataView(buffer);
+
+    // Verify magic bytes 'PATH'
+    const magic = String.fromCharCode(
+      view.getUint8(0),
+      view.getUint8(1),
+      view.getUint8(2),
+      view.getUint8(3)
+    );
+
+    if (magic !== 'PATH') {
+      throw new Error(`Invalid magic bytes: expected 'PATH', got '${magic}'`);
+    }
+
+    // Read point count
+    const pointCount = view.getUint32(4, true); // little-endian
+
+    // Calculate size
+    const positionsOffset = 8;
+    const positionsSize = pointCount * 12; // 3 floats (xyz) * 4 bytes
+
+    // Validate buffer size
+    const expectedSize = positionsOffset + positionsSize;
+    if (buffer.byteLength < expectedSize) {
+      throw new Error(
+        `Buffer size mismatch: expected at least ${expectedSize} bytes, got ${buffer.byteLength}`
+      );
+    }
+
+    // Extract positions (Float32Array)
+    const positions = new Float32Array(
+      buffer,
+      positionsOffset,
+      pointCount * 3
+    );
+
+    return {
+      pointCount,
+      positions,
+      timestamp: Date.now(),
+    };
+  }
+
+  /**
+   * Parse binary image message with 'IMAG' format
+   *
+   * Format:
+   * [0..3]      char[4]  'IMAG' (magic bytes)
+   * [4..)       bytes    Complete JPEG file
+   */
+  private parseImageMessage(buffer: ArrayBuffer): ImageData {
+    const view = new DataView(buffer);
+
+    // Verify magic bytes 'IMAG'
+    const magic = String.fromCharCode(
+      view.getUint8(0),
+      view.getUint8(1),
+      view.getUint8(2),
+      view.getUint8(3)
+    );
+
+    if (magic !== 'IMAG') {
+      throw new Error(`Invalid magic bytes: expected 'IMAG', got '${magic}'`);
+    }
+
+    // Extract JPEG data (skip 4-byte header)
+    const jpegData = buffer.slice(4);
+    const jpegBlob = new Blob([jpegData], { type: 'image/jpeg' });
+
+    return {
+      jpegBlob,
       timestamp: Date.now(),
     };
   }

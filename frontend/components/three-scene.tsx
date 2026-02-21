@@ -2,7 +2,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { WebSocketManager, PointCloudData, ConnectionStatus } from '@/lib/websocket-manager';
+import { WebSocketManager, PointCloudData, OdometryData, PathData, ConnectionStatus } from '@/lib/websocket-manager';
+import { useSlamStore } from '@/store/slam-store';
 
 interface ThreeSceneProps {
   wsHost?: string;
@@ -26,6 +27,8 @@ export default function ThreeScene({
   const rendererRef = useRef<any>(null);
   const controlsRef = useRef<any>(null);
   const pointCloudRef = useRef<any>(null);
+  const breadcrumbLineRef = useRef<any>(null);
+  const firefighterMarkerRef = useRef<any>(null);
   const wsManagerRef = useRef<WebSocketManager | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const threeRef = useRef<any>(null);
@@ -35,6 +38,15 @@ export default function ThreeScene({
   const [pointCount, setPointCount] = useState<number>(0);
   const [lastUpdateTime, setLastUpdateTime] = useState<number>(0);
   const [sceneLoadError, setSceneLoadError] = useState<string | null>(null);
+
+  // Zustand store actions and state
+  const setCurrentPosition = useSlamStore((state) => state.setCurrentPosition);
+  const setBreadcrumbTrail = useSlamStore((state) => state.setBreadcrumbTrail);
+  const waypoints = useSlamStore((state) => state.waypoints);
+  const addWaypoint = useSlamStore((state) => state.addWaypoint);
+
+  // Waypoint markers (refs for each waypoint)
+  const waypointMarkersRef = useRef<Map<string, any>>(new Map());
 
   const handlePointCloudData = useCallback((data: PointCloudData) => {
     const THREE = threeRef.current;
@@ -82,6 +94,102 @@ export default function ThreeScene({
     setLastUpdateTime(data.timestamp);
   }, []);
 
+  const handleOdometryData = useCallback((data: OdometryData) => {
+    const THREE = threeRef.current;
+    if (!THREE || !sceneRef.current) return;
+
+    // Update Zustand store
+    setCurrentPosition({
+      x: data.x,
+      y: data.y,
+      z: data.z,
+      qx: data.qx,
+      qy: data.qy,
+      qz: data.qz,
+      qw: data.qw,
+      timestamp: data.timestamp,
+    });
+
+    // Create or update firefighter marker (a red cone pointing up)
+    if (!firefighterMarkerRef.current) {
+      const geometry = new THREE.ConeGeometry(0.2, 0.5, 8);
+      const material = new THREE.MeshStandardMaterial({
+        color: 0xff3131, // Signal red from styling guide
+        emissive: 0xff3131,
+        emissiveIntensity: 0.5,
+      });
+      const cone = new THREE.Mesh(geometry, material);
+
+      // Add a glow ring at the base
+      const ringGeometry = new THREE.RingGeometry(0.2, 0.3, 16);
+      const ringMaterial = new THREE.MeshBasicMaterial({
+        color: 0xff3131,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.6,
+      });
+      const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = -0.25;
+
+      const markerGroup = new THREE.Group();
+      markerGroup.add(cone);
+      markerGroup.add(ring);
+
+      // Convert ROS Z-up to Three.js Y-up
+      markerGroup.rotation.x = -Math.PI / 2;
+
+      sceneRef.current.add(markerGroup);
+      firefighterMarkerRef.current = markerGroup;
+    }
+
+    // Update position (ROS coordinates)
+    firefighterMarkerRef.current.position.set(data.x, data.y, data.z);
+
+    // Update orientation (quaternion)
+    const markerQuaternion = new THREE.Quaternion(data.qx, data.qy, data.qz, data.qw);
+    // Apply the base rotation first, then the orientation
+    const baseRotation = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+    firefighterMarkerRef.current.quaternion.copy(markerQuaternion.multiply(baseRotation));
+  }, [setCurrentPosition]);
+
+  const handlePathData = useCallback((data: PathData) => {
+    const THREE = threeRef.current;
+    if (!THREE || !sceneRef.current) return;
+
+    // Update Zustand store
+    setBreadcrumbTrail({
+      positions: data.positions,
+      pointCount: data.pointCount,
+      timestamp: data.timestamp,
+    });
+
+    if (data.pointCount === 0) return;
+
+    // Create or update breadcrumb line
+    if (!breadcrumbLineRef.current) {
+      const geometry = new THREE.BufferGeometry();
+      const material = new THREE.LineBasicMaterial({
+        color: 0x00ff88, // Bright green for visibility
+        linewidth: 2,
+      });
+      const line = new THREE.Line(geometry, material);
+
+      // Convert ROS Z-up to Three.js Y-up
+      line.rotation.x = -Math.PI / 2;
+
+      sceneRef.current.add(line);
+      breadcrumbLineRef.current = line;
+    }
+
+    // Update line geometry
+    const geometry = breadcrumbLineRef.current.geometry;
+    geometry.setAttribute('position', new THREE.BufferAttribute(data.positions.slice(), 3));
+    geometry.setDrawRange(0, data.pointCount);
+    geometry.attributes.position.needsUpdate = true;
+    geometry.computeBoundingSphere();
+  }, [setBreadcrumbTrail]);
+
   const initWebSocket = useCallback(() => {
     const wsManager = new WebSocketManager({
       host: wsHost,
@@ -89,7 +197,9 @@ export default function ThreeScene({
       autoReconnect: true,
       reconnectInterval: 3000,
       maxReconnectAttempts: 10,
-      onMessage: handlePointCloudData,
+      onPointCloud: handlePointCloudData,
+      onOdometry: handleOdometryData,
+      onPath: handlePathData,
       onStatusChange: setConnectionStatus,
       onError: (error) => {
         console.error('WebSocket error:', error);
@@ -98,7 +208,7 @@ export default function ThreeScene({
 
     wsManager.connect();
     wsManagerRef.current = wsManager;
-  }, [wsHost, wsPort, handlePointCloudData]);
+  }, [wsHost, wsPort, handlePointCloudData, handleOdometryData, handlePathData]);
 
   const animate = useCallback(() => {
     animationFrameRef.current = requestAnimationFrame(animate);
@@ -132,6 +242,41 @@ export default function ThreeScene({
       }
       pointCloudRef.current = null;
     }
+
+    if (breadcrumbLineRef.current) {
+      breadcrumbLineRef.current.geometry.dispose();
+      breadcrumbLineRef.current.material.dispose();
+      breadcrumbLineRef.current = null;
+    }
+
+    if (firefighterMarkerRef.current) {
+      firefighterMarkerRef.current.traverse((child: any) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((mat: any) => mat.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      });
+      firefighterMarkerRef.current = null;
+    }
+
+    // Clean up waypoint markers
+    for (const marker of waypointMarkersRef.current.values()) {
+      marker.traverse((child: any) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) {
+            child.material.forEach((mat: any) => mat.dispose());
+          } else {
+            child.material.dispose();
+          }
+        }
+      });
+    }
+    waypointMarkersRef.current.clear();
 
     if (rendererRef.current) {
       rendererRef.current.dispose();
@@ -218,6 +363,79 @@ export default function ThreeScene({
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  // Sync waypoints from Zustand store to Three.js scene
+  useEffect(() => {
+    const THREE = threeRef.current;
+    if (!THREE || !sceneRef.current) return;
+
+    // Get current waypoint IDs
+    const currentIds = new Set(waypoints.map((w) => w.id));
+    const markerIds = new Set(waypointMarkersRef.current.keys());
+
+    // Remove deleted waypoints
+    for (const id of markerIds) {
+      if (!currentIds.has(id)) {
+        const marker = waypointMarkersRef.current.get(id);
+        if (marker) {
+          sceneRef.current.remove(marker);
+          marker.traverse((child: any) => {
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((mat: any) => mat.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
+          });
+          waypointMarkersRef.current.delete(id);
+        }
+      }
+    }
+
+    // Add new waypoints
+    for (const waypoint of waypoints) {
+      if (!waypointMarkersRef.current.has(waypoint.id)) {
+        // Create waypoint marker (a pulsing sphere with crosshair)
+        const color = waypoint.type === 'hazard' ? 0xffa500 : 0xff3131;
+
+        const sphereGeometry = new THREE.SphereGeometry(0.15, 16, 16);
+        const sphereMaterial = new THREE.MeshStandardMaterial({
+          color,
+          emissive: color,
+          emissiveIntensity: 0.6,
+          transparent: true,
+          opacity: 0.8,
+        });
+        const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+
+        // Add crosshair ring
+        const ringGeometry = new THREE.RingGeometry(0.2, 0.25, 32);
+        const ringMaterial = new THREE.MeshBasicMaterial({
+          color,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.5,
+        });
+        const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+        ring.rotation.x = -Math.PI / 2;
+
+        const markerGroup = new THREE.Group();
+        markerGroup.add(sphere);
+        markerGroup.add(ring);
+
+        // Set position (ROS coordinates)
+        markerGroup.position.copy(waypoint.position);
+
+        // Convert ROS Z-up to Three.js Y-up
+        markerGroup.rotation.x = -Math.PI / 2;
+
+        sceneRef.current.add(markerGroup);
+        waypointMarkersRef.current.set(waypoint.id, markerGroup);
+      }
+    }
+  }, [waypoints]);
 
   useEffect(() => {
     let mounted = true;
