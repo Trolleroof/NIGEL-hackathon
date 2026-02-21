@@ -16,6 +16,7 @@
   <depend>tf2_sensor_msgs</depend>
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
+  <depend>nav_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>boost</depend>
 

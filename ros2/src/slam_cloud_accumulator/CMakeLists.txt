@@ -13,6 +13,7 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 
 find_package(PCL REQUIRED COMPONENTS common filters)
@@ -39,6 +40,7 @@ target_link_libraries(slam_cloud_accumulator
 ament_target_dependencies(slam_cloud_accumulator
   rclcpp
   sensor_msgs
+  nav_msgs
   std_srvs
   tf2_ros
   tf2_sensor_msgs
