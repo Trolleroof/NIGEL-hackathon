@@ -58,3 +58,6 @@
     2.  [cite_start]**Right Sidebar:** Unit Status & Air Supply. [cite: 28, 31]
     3.  [cite_start]**Bottom Left:** Body-cam feeds (FF1, FF2, etc.). [cite: 31]
     4.  [cite_start]**Bottom Right:** Radio Transcript / AI Alerts. [cite: 32]
+
+## 7. Styling
+Make sure to use next.js, tailwind, anime.js, and any other component styling to ensure the product looks nice and handles all animations + functionality smoothly. Most importantly, make sure the three.js is functioning and taking in the colored point cloud properly. the point cloud on the frontend needs to be in color and with good functionality such as moving around too.
