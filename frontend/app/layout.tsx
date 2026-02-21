@@ -15,7 +15,7 @@ const spaceMono = Space_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "FIRECOMMAND // NIGEL",
+  title: "FIRECOMMAND",
   description: "Tactical Incident Command System",
 }
 

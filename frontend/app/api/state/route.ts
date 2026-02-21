@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 
 interface Position { x: number; y: number }
 interface RadioMessage { id: number; from: string; message: string; timestamp: string }
-interface FireCommandState {
+interface NigelState {
   firefighterPosition: Position
   waypoint: Position | null
   radioLog: RadioMessage[]
@@ -12,7 +12,7 @@ interface FireCommandState {
 
 declare global {
   // eslint-disable-next-line no-var
-  var _fireCommandState: FireCommandState | undefined
+  var _nigelState: NigelState | undefined
 }
 
 function ts() {
@@ -21,12 +21,12 @@ function ts() {
   })
 }
 
-if (!global._fireCommandState) {
-  global._fireCommandState = {
+if (!global._nigelState) {
+  global._nigelState = {
     firefighterPosition: { x: 435, y: 400 },
     waypoint: null,
     radioLog: [
-      { id: 1, from: 'SYSTEM', message: 'NIGEL online. All systems nominal.', timestamp: ts() },
+      { id: 1, from: 'SYSTEM', message: 'System online. All systems nominal.', timestamp: ts() },
       { id: 2, from: 'DISPATCH', message: 'FF1 awaiting deployment.', timestamp: ts() },
     ],
     firefighterStatus: 'OK',
@@ -35,12 +35,12 @@ if (!global._fireCommandState) {
 }
 
 export async function GET() {
-  return NextResponse.json(global._fireCommandState)
+  return NextResponse.json(global._nigelState)
 }
 
 export async function POST(request: Request) {
   const body = await request.json()
-  const state = global._fireCommandState!
+  const state = global._nigelState!
 
   switch (body.type) {
     case 'dispatcher_places_waypoint':
@@ -87,7 +87,7 @@ export async function POST(request: Request) {
       break
 
     case 'reset':
-      global._fireCommandState = {
+      global._nigelState = {
         firefighterPosition: { x: 435, y: 400 },
         waypoint: null,
         radioLog: [{ id: Date.now(), from: 'SYSTEM', message: 'System reset.', timestamp: ts() }],

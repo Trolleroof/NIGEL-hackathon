@@ -218,9 +218,7 @@ export default function FirefighterPage() {
           <span className="font-display" style={{ fontSize: '14px', fontWeight: 900, color: '#fff', letterSpacing: '0.1em' }}>
             FF1
           </span>
-          <span className="font-mono" style={{ fontSize: '9px', color: '#4d1010', letterSpacing: '0.15em' }}>
-            // NIGEL
-          </span>
+
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span className="font-mono" style={{ fontSize: '9px', color: '#333', letterSpacing: '0.1em' }}>
