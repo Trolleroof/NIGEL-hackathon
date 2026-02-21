@@ -5,6 +5,9 @@ import Link from 'next/link'
 // ─── Canvas constants ───────────────────────────────────────────────
 const CW = 900
 const CH = 500
+const RIGHT_PANEL_WIDTH = 240
+const MIN_LEFT_PANEL_WIDTH = 280
+const MIN_CENTER_PANEL_WIDTH = 460
 
 // ─── Types ──────────────────────────────────────────────────────────
 interface Pos { x: number; y: number }
@@ -17,7 +20,7 @@ interface State {
   breadcrumbs: Pos[]
 }
 
-type FeedKind = 'youtube' | 'live'
+type FeedKind = 'video' | 'live'
 
 interface CameraFeed {
   id: string
@@ -27,16 +30,14 @@ interface CameraFeed {
   note?: string
 }
 
-const YT_FALLBACK = 'https://www.youtube.com/embed/M7lc1UVf-VE?autoplay=1&mute=1&playsinline=1&rel=0'
-
 // Ordered row-major (2 columns x 3 rows). Slot 4 is row 2 / col 2.
 const CAMERA_FEEDS: CameraFeed[] = [
-  { id: 'FF1', label: 'UNIT FF1', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF2', label: 'UNIT FF2', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF3', label: 'UNIT FF3', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF1', label: 'UNIT FF1', kind: 'video', src: '/api/feeds/videoplayback.mp4' },
+  { id: 'FF2', label: 'UNIT FF2', kind: 'video', src: '/api/feeds/vid2.mp4' },
+  { id: 'FF3', label: 'UNIT FF3', kind: 'video', src: '/api/feeds/vid3.mp4' },
   { id: 'FF4', label: 'RAW CAM', kind: 'live', note: 'LIVE INPUT' },
-  { id: 'FF5', label: 'UNIT FF5', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF6', label: 'UNIT FF6', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF5', label: 'UNIT FF5', kind: 'video', src: '/api/feeds/vid4.mp4' },
+  { id: 'FF6', label: 'UNIT FF6', kind: 'video', src: '/api/feeds/vid5.mp4' },
 ]
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -155,9 +156,21 @@ export default function DispatcherPage() {
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
   const [liveFeedError, setLiveFeedError] = useState<string | null>(null)
   const [isCompactLayout, setIsCompactLayout] = useState(false)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(310)
+  const [isResizingFeeds, setIsResizingFeeds] = useState(false)
   const startRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
+  const resizeStartRef = useRef<{ x: number; width: number } | null>(null)
   const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
+
+  const clampLeftPanelWidth = useCallback((nextWidth: number) => {
+    if (typeof window === 'undefined') return nextWidth
+    const maxWidth = Math.max(
+      MIN_LEFT_PANEL_WIDTH,
+      window.innerWidth - RIGHT_PANEL_WIDTH - MIN_CENTER_PANEL_WIDTH - 36,
+    )
+    return Math.min(Math.max(nextWidth, MIN_LEFT_PANEL_WIDTH), maxWidth)
+  }, [])
 
   // Clock + tick
   useEffect(() => {
@@ -221,11 +234,49 @@ export default function DispatcherPage() {
   }, [])
 
   useEffect(() => {
-    const onResize = () => setIsCompactLayout(window.innerWidth < 1180)
+    const onResize = () => {
+      setIsCompactLayout(window.innerWidth < 1180)
+      setLeftPanelWidth(prev => clampLeftPanelWidth(prev))
+    }
     onResize()
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [clampLeftPanelWidth])
+
+  const startResizingFeeds = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    if (isCompactLayout) return
+    resizeStartRef.current = { x: e.clientX, width: leftPanelWidth }
+    setIsResizingFeeds(true)
+    e.preventDefault()
+  }, [isCompactLayout, leftPanelWidth])
+
+  useEffect(() => {
+    if (!isResizingFeeds) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      const start = resizeStartRef.current
+      if (!start) return
+      const resized = start.width + (e.clientX - start.x)
+      setLeftPanelWidth(clampLeftPanelWidth(resized))
+    }
+
+    const onMouseUp = () => {
+      setIsResizingFeeds(false)
+      resizeStartRef.current = null
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingFeeds, clampLeftPanelWidth])
 
   // Auto-scroll log
   useEffect(() => {
@@ -323,10 +374,7 @@ export default function DispatcherPage() {
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <HBtn onClick={clearWaypoint} label="CLR WPT" />
-            <HBtn onClick={resetAll} label="RESET" dim />
-          </div>
+       
           <Link href="/" className="font-mono" style={{
             fontSize: '9px', color: '#333', textDecoration: 'none', letterSpacing: '0.1em',
           }}>← HOME</Link>
@@ -336,7 +384,7 @@ export default function DispatcherPage() {
       {/* ── Body ── */}
       <div style={{
         flex: 1, display: 'grid',
-        gridTemplateColumns: isCompactLayout ? '1fr' : '310px 1fr 240px',
+        gridTemplateColumns: isCompactLayout ? '1fr' : `${leftPanelWidth}px 1fr ${RIGHT_PANEL_WIDTH}px`,
         gridTemplateRows: isCompactLayout ? 'minmax(330px, 42vh) minmax(280px, 36vh) minmax(220px, 1fr)' : '1fr',
         gap: '8px',
         padding: '8px',
@@ -344,34 +392,66 @@ export default function DispatcherPage() {
       }}>
 
         {/* Left: Camera Grid */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-          <div className="panel-header">MULTI-UNIT VIEWPORTS</div>
-          <div style={{
-            padding: '10px',
-            flex: 1,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-            gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
-            gap: '8px',
-            minHeight: 0,
-          }}>
-            {CAMERA_FEEDS.map(feed => (
-              <FeedTile
-                key={feed.id}
-                feed={feed}
-                liveStream={liveStream}
-                liveFeedError={liveFeedError}
-                isExpanded={expandedFeedId === feed.id}
-                statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
-                onToggleExpand={setExpandedFeedId}
-              />
-            ))}
-          </div>
-          <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
-            <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
-              ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
+        <div style={{ position: 'relative', minHeight: 0 }}>
+          <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%' }}>
+            <div className="panel-header">MULTI-UNIT VIEWPORTS</div>
+            <div style={{
+              padding: '10px',
+              flex: 1,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+              gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
+              gap: '8px',
+              minHeight: 0,
+            }}>
+              {CAMERA_FEEDS.map(feed => (
+                <FeedTile
+                  key={feed.id}
+                  feed={feed}
+                  liveStream={liveStream}
+                  liveFeedError={liveFeedError}
+                  isExpanded={expandedFeedId === feed.id}
+                  statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
+                  onToggleExpand={setExpandedFeedId}
+                />
+              ))}
+            </div>
+            <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
+              <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
+                ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
+              </div>
             </div>
           </div>
+
+          {!isCompactLayout && (
+            <button
+              type="button"
+              aria-label="Resize camera feed panel"
+              onMouseDown={startResizingFeeds}
+              style={{
+                position: 'absolute',
+                top: '8px',
+                bottom: '8px',
+                right: '-10px',
+                width: '12px',
+                padding: 0,
+                border: 'none',
+                background: 'transparent',
+                cursor: 'col-resize',
+                zIndex: 8,
+              }}
+            >
+              <span style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: '5px',
+                width: '2px',
+                background: isResizingFeeds ? '#ff3131' : '#1a1a1a',
+                boxShadow: isResizingFeeds ? '0 0 8px rgba(255,49,49,0.8)' : 'none',
+              }} />
+            </button>
+          )}
         </div>
 
         {/* Center: Map
@@ -661,7 +741,7 @@ function FeedTile({
           color: feed.kind === 'live' ? '#ff3131' : '#666',
           letterSpacing: '0.08em',
         }}>
-          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'YOUTUBE FEED'}
+          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'SIMULATED LIVE FEED'}
         </span>
         {statusText && (
           <span className="font-mono" style={{
@@ -686,10 +766,11 @@ function FeedViewport({
   liveStream: MediaStream | null
   liveFeedError: string | null
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const liveVideoRef = useRef<HTMLVideoElement>(null)
+  const replayVideoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
-    const el = videoRef.current
+    const el = liveVideoRef.current
     if (!el || feed.kind !== 'live') return
     if (liveStream) {
       el.srcObject = liveStream
@@ -699,11 +780,20 @@ function FeedViewport({
     el.srcObject = null
   }, [feed.kind, liveStream])
 
+  useEffect(() => {
+    const el = replayVideoRef.current
+    if (!el || feed.kind !== 'video') return
+    el.muted = true
+    el.defaultMuted = true
+    el.volume = 0
+    void el.play().catch(() => {})
+  }, [feed.kind, feed.src])
+
   if (feed.kind === 'live') {
     return (
       <>
         <video
-          ref={videoRef}
+          ref={liveVideoRef}
           autoPlay
           muted
           playsInline
@@ -734,13 +824,19 @@ function FeedViewport({
   }
 
   return (
-    <iframe
-      src={feed.src ?? YT_FALLBACK}
-      title={`${feed.id} video feed`}
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-      referrerPolicy="strict-origin-when-cross-origin"
-      allowFullScreen
-      style={{ width: '100%', height: '100%', border: 0, display: 'block' }}
+    <video
+      ref={replayVideoRef}
+      src={feed.src}
+      autoPlay
+      muted
+      loop
+      playsInline
+      disablePictureInPicture
+      controlsList="nodownload noplaybackrate noremoteplayback"
+      controls={false}
+      tabIndex={-1}
+      onContextMenu={e => e.preventDefault()}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
     />
   )
 }
