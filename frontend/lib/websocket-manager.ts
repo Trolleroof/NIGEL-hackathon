@@ -184,6 +184,8 @@ export class WebSocketManager {
    * [8+N*12..)     uint8[]    RGB colors (r0,g0,b0, r1,g1,b1, ...)
    */
   private parsePointCloudMessage(buffer: ArrayBuffer): PointCloudData {
+    console.log('Parsing point cloud message, buffer size:', buffer.byteLength);
+
     const view = new DataView(buffer);
 
     // Verify magic bytes 'PTCL'
@@ -194,18 +196,30 @@ export class WebSocketManager {
       view.getUint8(3)
     );
 
+    console.log('Magic bytes:', magic);
+
     if (magic !== 'PTCL') {
       throw new Error(`Invalid magic bytes: expected 'PTCL', got '${magic}'`);
     }
 
     // Read point count
     const pointCount = view.getUint32(4, true); // little-endian
+    console.log('Point count:', pointCount);
 
     // Calculate offsets
     const positionsOffset = 8;
     const positionsSize = pointCount * 12; // 3 floats (xyz) * 4 bytes
     const colorsOffset = positionsOffset + positionsSize;
     const colorsSize = pointCount * 3; // 3 bytes (rgb)
+
+    console.log('Data layout:', {
+      positionsOffset,
+      positionsSize,
+      colorsOffset,
+      colorsSize,
+      expectedTotalSize: colorsOffset + colorsSize,
+      actualBufferSize: buffer.byteLength,
+    });
 
     // Validate buffer size
     const expectedSize = colorsOffset + colorsSize;
@@ -228,6 +242,13 @@ export class WebSocketManager {
       colorsOffset,
       pointCount * 3
     );
+
+    console.log('Parsed data:', {
+      positionsLength: positions.length,
+      colorsLength: colors.length,
+      firstPosition: [positions[0], positions[1], positions[2]],
+      firstColor: [colors[0], colors[1], colors[2]],
+    });
 
     return {
       pointCount,
