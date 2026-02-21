@@ -15,8 +15,8 @@ const spaceMono = Space_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "FIRECOMMAND",
-  description: "Tactical Incident Command System",
+  title: "NIGEL",
+  description: "Navigation, Incident Guidance, and Emergency Localization & Control",
 }
 
 export default function RootLayout({

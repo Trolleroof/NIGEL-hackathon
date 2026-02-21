@@ -86,6 +86,15 @@ export async function POST(request: Request) {
       if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
       break
 
+    case 'dispatcher_voice_message':
+      state.radioLog.push({
+        id: Date.now(), from: 'DISPATCH',
+        message: body.message,
+        timestamp: ts(),
+      })
+      if (state.radioLog.length > 120) state.radioLog = state.radioLog.slice(-120)
+      break
+
     case 'reset':
       global._nigelState = {
         firefighterPosition: { x: 435, y: 400 },

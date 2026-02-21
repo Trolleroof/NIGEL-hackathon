@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
@@ -9,6 +10,10 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
+
+#include <cv_bridge/cv_bridge.h>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 // WebSocket via Boost.Beast (header-only) + Boost.Asio
 #include <boost/beast/core.hpp>
@@ -34,8 +39,8 @@ using tcp           = net::ip::tcp;
 // ─────────────────────────────────────────────────────────────────────────────
 // WsSession – one connected WebSocket client (server-push only)
 //
-// Writes are serialized via a mutex so broadcast() can be called from any
-// thread.  We do not start a reader: disconnects are detected on write error.
+// Writes are serialized with a mutex so broadcast() can be called from any
+// thread.  Disconnects are detected lazily on the next failed write.
 // ─────────────────────────────────────────────────────────────────────────────
 class WsSession
 {
@@ -49,7 +54,7 @@ public:
     boost::system::error_code ec;
     ws_.accept(ec);
     if (ec) return false;
-    ws_.binary(true);   // all frames are binary
+    ws_.binary(true);
     return true;
   }
 
@@ -90,7 +95,7 @@ public:
     acceptor_.set_option(net::socket_base::reuse_address(true));
     acceptor_.bind(ep);
     acceptor_.listen(net::socket_base::max_listen_connections);
-    RCLCPP_INFO(logger_, "WebSocket point-cloud server on ws://0.0.0.0:%u", port);
+    RCLCPP_INFO(logger_, "WebSocket server on ws://0.0.0.0:%u", port);
   }
 
   ~WsBroadcaster() { stop(); }
@@ -103,11 +108,11 @@ public:
   void stop()
   {
     boost::system::error_code ec;
-    acceptor_.close(ec);           // unblocks the blocking accept() call
+    acceptor_.close(ec);           // unblocks the blocking accept()
     if (accept_thread_.joinable()) accept_thread_.join();
   }
 
-  // Broadcast to all live sessions; dead sessions are pruned in-place.
+  // Broadcast binary data to all live sessions; dead sessions are pruned.
   void broadcast(const std::vector<uint8_t> & data)
   {
     std::lock_guard<std::mutex> lk(sessions_mutex_);
@@ -170,14 +175,20 @@ public:
   : Node("slam_cloud_accumulator"),
     tf_buffer_(this->get_clock()),
     tf_listener_(tf_buffer_),
-    scans_since_refilter_(0)
+    scans_since_refilter_(0),
+    last_image_ws_send_(0, 0, RCL_ROS_TIME)
   {
+    // ── Parameters ───────────────────────────────────────────────────────────
     this->declare_parameter("fixed_frame",            "odom");
     this->declare_parameter("input_topic",            "/odin1/cloud_slam");
     this->declare_parameter("voxel_size",             0.05);
     this->declare_parameter("publish_hz",             2.0);
     this->declare_parameter("refilter_every_n_scans", 10);
     this->declare_parameter("ws_port",                9090);
+    this->declare_parameter("image_topic",            "/odin1/image/undistored");
+    this->declare_parameter("image_hz",               10.0);
+    this->declare_parameter("jpeg_quality",           80);
+    this->declare_parameter("image_scale",            1.0);
 
     fixed_frame_            = this->get_parameter("fixed_frame").as_string();
     input_topic_            = this->get_parameter("input_topic").as_string();
@@ -185,11 +196,15 @@ public:
     publish_hz_             = this->get_parameter("publish_hz").as_double();
     refilter_every_n_scans_ = this->get_parameter("refilter_every_n_scans").as_int();
     const int ws_port       = this->get_parameter("ws_port").as_int();
+    image_topic_            = this->get_parameter("image_topic").as_string();
+    image_hz_               = this->get_parameter("image_hz").as_double();
+    jpeg_quality_           = this->get_parameter("jpeg_quality").as_int();
+    image_scale_            = this->get_parameter("image_scale").as_double();
 
+    // ── Point cloud pipeline ─────────────────────────────────────────────────
     accumulated_cloud_ = std::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
     voxel_.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
 
-    // ROS publisher — reliable QoS for RViz / other ROS consumers
     cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       "/slam_cloud_accumulator/cloud", rclcpp::QoS(2).reliable());
 
@@ -206,15 +221,24 @@ public:
       std::bind(&SlamCloudAccumulator::resetCallback, this,
                 std::placeholders::_1, std::placeholders::_2));
 
-    // WebSocket broadcaster — starts its own accept thread
+    // ── Camera feed ──────────────────────────────────────────────────────────
+    image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+      image_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&SlamCloudAccumulator::imageCallback, this, std::placeholders::_1));
+
+    // ── WebSocket broadcaster ────────────────────────────────────────────────
     ws_broadcaster_ = std::make_unique<WsBroadcaster>(
       static_cast<uint16_t>(ws_port), this->get_logger());
     ws_broadcaster_->start();
 
     RCLCPP_INFO(this->get_logger(),
-      "slam_cloud_accumulator ready. frame='%s', voxel=%.3f m, "
-      "publish=%.1f Hz, ws=ws://localhost:%d",
-      fixed_frame_.c_str(), voxel_size_, publish_hz_, ws_port);
+      "slam_cloud_accumulator ready.\n"
+      "  point cloud : frame='%s', voxel=%.3f m, publish=%.1f Hz\n"
+      "  camera feed : topic='%s', max %.1f Hz, JPEG q=%d, scale=%.2f\n"
+      "  WebSocket   : ws://localhost:%d",
+      fixed_frame_.c_str(), voxel_size_, publish_hz_,
+      image_topic_.c_str(), image_hz_, jpeg_quality_, image_scale_,
+      ws_port);
   }
 
   ~SlamCloudAccumulator()
@@ -223,9 +247,9 @@ public:
   }
 
 private:
-  // ── Binary serialisation for Three.js ────────────────────────────────────
+  // ── Point cloud serialisation ─────────────────────────────────────────────
   //
-  //  Wire format (all values little-endian, matching x86 native byte order):
+  //  Wire format — magic 'PTCL' (all values little-endian):
   //
   //    Bytes          Type       Content
   //    ─────────────────────────────────────────────────────────────────────
@@ -234,12 +258,10 @@ private:
   //    [8..8+N*12)    float32[]  XYZ positions: x0,y0,z0, x1,y1,z1, …
   //    [8+N*12..)     uint8[]    RGB colours:   r0,g0,b0, r1,g1,b1, …
   //
-  //  Three.js decode snippet:
-  //
-  //    const dv    = new DataView(event.data);
-  //    const N     = dv.getUint32(4, /*le=*/true);
-  //    const xyz   = new Float32Array(event.data, 8, N * 3);
-  //    const rgb   = new Uint8Array(event.data, 8 + N * 12, N * 3);
+  //  Three.js decode:
+  //    const N   = new DataView(buf).getUint32(4, true);
+  //    const xyz = new Float32Array(buf, 8, N * 3);
+  //    const rgb = new Uint8Array(buf, 8 + N * 12, N * 3);
   //
   static std::vector<uint8_t> serializeCloud(
     const pcl::PointCloud<pcl::PointXYZRGB> & cloud)
@@ -265,7 +287,33 @@ private:
     return buf;
   }
 
-  // ── Incoming scan ─────────────────────────────────────────────────────────
+  // ── Image serialisation ───────────────────────────────────────────────────
+  //
+  //  Wire format — magic 'IMAG':
+  //
+  //    Bytes    Type      Content
+  //    ──────────────────────────────────────────────────────────────────────
+  //    [0..3]   char[4]   Magic: 'I','M','A','G'
+  //    [4..]    bytes     Complete JPEG file
+  //
+  //  Three.js decode:
+  //    const blob = new Blob([buf.slice(4)], { type: 'image/jpeg' });
+  //    imgElement.src = URL.createObjectURL(blob);
+  //
+  static std::vector<uint8_t> serializeImage(
+    const cv::Mat & image, int jpeg_quality)
+  {
+    const std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, jpeg_quality};
+    std::vector<uint8_t> jpeg;
+    cv::imencode(".jpg", image, jpeg, params);
+
+    std::vector<uint8_t> frame(4 + jpeg.size());
+    frame[0] = 'I'; frame[1] = 'M'; frame[2] = 'A'; frame[3] = 'G';
+    std::memcpy(frame.data() + 4, jpeg.data(), jpeg.size());
+    return frame;
+  }
+
+  // ── Incoming point cloud ──────────────────────────────────────────────────
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
     sensor_msgs::msg::PointCloud2 transformed;
@@ -303,7 +351,41 @@ private:
     }
   }
 
-  // ── Publish / broadcast timer ─────────────────────────────────────────────
+  // ── Incoming camera frame ─────────────────────────────────────────────────
+  void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
+  {
+    if (ws_broadcaster_->clientCount() == 0) return;
+
+    // Throttle to image_hz_ (0 = pass every frame)
+    if (image_hz_ > 0.0) {
+      const rclcpp::Time now = this->now();
+      if ((now - last_image_ws_send_).seconds() < 1.0 / image_hz_) return;
+      last_image_ws_send_ = now;
+    }
+
+    // Convert to BGR (handles RGB8, RGBA8, mono8, bayer, …)
+    cv_bridge::CvImageConstPtr cv_ptr;
+    try {
+      cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
+    } catch (const cv_bridge::Exception & e) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+        "cv_bridge conversion failed: %s", e.what());
+      return;
+    }
+
+    // Optional downscale (useful for bandwidth control over non-local links)
+    cv::Mat to_encode;
+    if (image_scale_ < 0.999) {
+      cv::resize(cv_ptr->image, to_encode,
+                 {}, image_scale_, image_scale_, cv::INTER_LINEAR);
+    } else {
+      to_encode = cv_ptr->image;   // zero-copy reference; cv_ptr keeps data alive
+    }
+
+    ws_broadcaster_->broadcast(serializeImage(to_encode, jpeg_quality_));
+  }
+
+  // ── Publish / broadcast timer (point cloud) ───────────────────────────────
   void publishCallback()
   {
     const bool ros_pub = cloud_pub_->get_subscription_count() > 0;
@@ -325,7 +407,6 @@ private:
       out_msg.header.stamp    = this->now();
       cloud_pub_->publish(out_msg);
     }
-
     if (ws_pub) {
       ws_broadcaster_->broadcast(ws_frame);
     }
@@ -347,13 +428,14 @@ private:
   // ── Members ───────────────────────────────────────────────────────────────
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    cloud_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr       image_sub_;
   rclcpp::TimerBase::SharedPtr                                   publish_timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr             reset_srv_;
 
   tf2_ros::Buffer            tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
-  pcl::VoxelGrid<pcl::PointXYZRGB>      voxel_;
+  pcl::VoxelGrid<pcl::PointXYZRGB>       voxel_;
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr accumulated_cloud_;
   std::mutex                             cloud_mutex_;
   int                                    scans_since_refilter_;
@@ -363,6 +445,12 @@ private:
   float       voxel_size_;
   double      publish_hz_;
   int         refilter_every_n_scans_;
+
+  std::string  image_topic_;
+  double       image_hz_;
+  int          jpeg_quality_;
+  double       image_scale_;
+  rclcpp::Time last_image_ws_send_;
 
   std::unique_ptr<WsBroadcaster> ws_broadcaster_;
 };

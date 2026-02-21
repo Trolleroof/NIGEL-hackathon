@@ -5,6 +5,9 @@ import Link from 'next/link'
 // ─── Canvas constants ───────────────────────────────────────────────
 const CW = 900
 const CH = 500
+const RIGHT_PANEL_WIDTH = 240
+const MIN_LEFT_PANEL_WIDTH = 280
+const MIN_CENTER_PANEL_WIDTH = 460
 
 // ─── Types ──────────────────────────────────────────────────────────
 interface Pos { x: number; y: number }
@@ -17,7 +20,7 @@ interface State {
   breadcrumbs: Pos[]
 }
 
-type FeedKind = 'youtube' | 'live'
+type FeedKind = 'video' | 'live'
 
 interface CameraFeed {
   id: string
@@ -27,16 +30,14 @@ interface CameraFeed {
   note?: string
 }
 
-const YT_FALLBACK = 'https://www.youtube.com/embed/M7lc1UVf-VE?autoplay=1&mute=1&playsinline=1&rel=0'
-
 // Ordered row-major (2 columns x 3 rows). Slot 4 is row 2 / col 2.
 const CAMERA_FEEDS: CameraFeed[] = [
-  { id: 'FF1', label: 'UNIT FF1', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF2', label: 'UNIT FF2', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF3', label: 'UNIT FF3', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF1', label: 'UNIT FF1', kind: 'video', src: '/api/feeds/videoplayback.mp4' },
+  { id: 'FF2', label: 'UNIT FF2', kind: 'video', src: '/api/feeds/vid2.mp4' },
+  { id: 'FF3', label: 'UNIT FF3', kind: 'video', src: '/api/feeds/vid3.mp4' },
   { id: 'FF4', label: 'RAW CAM', kind: 'live', note: 'LIVE INPUT' },
-  { id: 'FF5', label: 'UNIT FF5', kind: 'youtube', src: YT_FALLBACK },
-  { id: 'FF6', label: 'UNIT FF6', kind: 'youtube', src: YT_FALLBACK },
+  { id: 'FF5', label: 'UNIT FF5', kind: 'video', src: '/api/feeds/vid4.mp4' },
+  { id: 'FF6', label: 'UNIT FF6', kind: 'video', src: '/api/feeds/vid5.mp4' },
 ]
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -155,9 +156,28 @@ export default function DispatcherPage() {
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
   const [liveFeedError, setLiveFeedError] = useState<string | null>(null)
   const [isCompactLayout, setIsCompactLayout] = useState(false)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(310)
+  const [isResizingFeeds, setIsResizingFeeds] = useState(false)
   const startRef = useRef(0)
   const logRef = useRef<HTMLDivElement>(null)
+  const resizeStartRef = useRef<{ x: number; width: number } | null>(null)
   const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
+
+  const clampLeftPanelWidth = useCallback((nextWidth: number) => {
+    if (typeof window === 'undefined') return nextWidth
+    const maxWidth = Math.max(
+      MIN_LEFT_PANEL_WIDTH,
+      window.innerWidth - RIGHT_PANEL_WIDTH - MIN_CENTER_PANEL_WIDTH - 36,
+    )
+    return Math.min(Math.max(nextWidth, MIN_LEFT_PANEL_WIDTH), maxWidth)
+  }, [])
+
+  // ── Speech-to-Text state ──
+  const [isRecording, setIsRecording] = useState(false)
+  const [interimText, setInterimText] = useState('')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null)
+  const finalTranscriptRef = useRef('')
 
   // Clock + tick
   useEffect(() => {
@@ -221,11 +241,49 @@ export default function DispatcherPage() {
   }, [])
 
   useEffect(() => {
-    const onResize = () => setIsCompactLayout(window.innerWidth < 1180)
+    const onResize = () => {
+      setIsCompactLayout(window.innerWidth < 1180)
+      setLeftPanelWidth(prev => clampLeftPanelWidth(prev))
+    }
     onResize()
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [])
+  }, [clampLeftPanelWidth])
+
+  const startResizingFeeds = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+    if (isCompactLayout) return
+    resizeStartRef.current = { x: e.clientX, width: leftPanelWidth }
+    setIsResizingFeeds(true)
+    e.preventDefault()
+  }, [isCompactLayout, leftPanelWidth])
+
+  useEffect(() => {
+    if (!isResizingFeeds) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      const start = resizeStartRef.current
+      if (!start) return
+      const resized = start.width + (e.clientX - start.x)
+      setLeftPanelWidth(clampLeftPanelWidth(resized))
+    }
+
+    const onMouseUp = () => {
+      setIsResizingFeeds(false)
+      resizeStartRef.current = null
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizingFeeds, clampLeftPanelWidth])
 
   // Auto-scroll log
   useEffect(() => {
@@ -282,6 +340,74 @@ export default function DispatcherPage() {
     })
   }
 
+  // ── Speech Recognition helpers ──
+  const startRecording = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any
+    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition
+    if (!SpeechRecognitionAPI) {
+      console.error('SpeechRecognition not supported in this browser')
+      return
+    }
+
+    const recognition = new SpeechRecognitionAPI()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+
+    finalTranscriptRef.current = ''
+    setInterimText('')
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      let interim = ''
+      let final = ''
+      for (let i = 0; i < event.results.length; i++) {
+        const result = event.results[i]
+        if (result.isFinal) {
+          final += result[0].transcript
+        } else {
+          interim += result[0].transcript
+        }
+      }
+      finalTranscriptRef.current = final
+      setInterimText(interim)
+    }
+
+    recognition.onerror = () => {
+      setIsRecording(false)
+    }
+
+    recognition.onend = () => {
+      setIsRecording(false)
+    }
+
+    recognitionRef.current = recognition
+    recognition.start()
+    setIsRecording(true)
+  }, [])
+
+  const stopRecording = useCallback(async () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop()
+    }
+    setIsRecording(false)
+
+    // Wait a moment to let final results settle
+    await new Promise(r => setTimeout(r, 300))
+
+    const transcript = (finalTranscriptRef.current || interimText).trim()
+    setInterimText('')
+
+    if (transcript) {
+      await fetch('/api/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'dispatcher_voice_message', message: transcript }),
+      })
+    }
+  }, [interimText])
+
   const fmtElapsed = (s: number) => {
     const m = Math.floor(s / 60).toString().padStart(2, '0')
     const ss = (s % 60).toString().padStart(2, '0')
@@ -323,10 +449,7 @@ export default function DispatcherPage() {
             <Stat label="FF1" value={state.firefighterStatus}
               valueColor={statusColor(state.firefighterStatus)} />
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <HBtn onClick={clearWaypoint} label="CLR WPT" />
-            <HBtn onClick={resetAll} label="RESET" dim />
-          </div>
+
           <Link href="/" className="font-mono" style={{
             fontSize: '9px', color: '#333', textDecoration: 'none', letterSpacing: '0.1em',
           }}>← HOME</Link>
@@ -336,7 +459,7 @@ export default function DispatcherPage() {
       {/* ── Body ── */}
       <div style={{
         flex: 1, display: 'grid',
-        gridTemplateColumns: isCompactLayout ? '1fr' : '310px 1fr 240px',
+        gridTemplateColumns: isCompactLayout ? '1fr' : `${leftPanelWidth}px 1fr ${RIGHT_PANEL_WIDTH}px`,
         gridTemplateRows: isCompactLayout ? 'minmax(330px, 42vh) minmax(280px, 36vh) minmax(220px, 1fr)' : '1fr',
         gap: '8px',
         padding: '8px',
@@ -344,34 +467,66 @@ export default function DispatcherPage() {
       }}>
 
         {/* Left: Camera Grid */}
-        <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-          <div className="panel-header">MULTI-UNIT VIEWPORTS</div>
-          <div style={{
-            padding: '10px',
-            flex: 1,
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-            gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
-            gap: '8px',
-            minHeight: 0,
-          }}>
-            {CAMERA_FEEDS.map(feed => (
-              <FeedTile
-                key={feed.id}
-                feed={feed}
-                liveStream={liveStream}
-                liveFeedError={liveFeedError}
-                isExpanded={expandedFeedId === feed.id}
-                statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
-                onToggleExpand={setExpandedFeedId}
-              />
-            ))}
-          </div>
-          <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
-            <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
-              ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
+        <div style={{ position: 'relative', minHeight: 0 }}>
+          <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, height: '100%' }}>
+            <div className="panel-header">MULTI-UNIT VIEWPORTS</div>
+            <div style={{
+              padding: '10px',
+              flex: 1,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+              gridTemplateRows: 'repeat(3, minmax(0, 1fr))',
+              gap: '8px',
+              minHeight: 0,
+            }}>
+              {CAMERA_FEEDS.map(feed => (
+                <FeedTile
+                  key={feed.id}
+                  feed={feed}
+                  liveStream={liveStream}
+                  liveFeedError={liveFeedError}
+                  isExpanded={expandedFeedId === feed.id}
+                  statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
+                  onToggleExpand={setExpandedFeedId}
+                />
+              ))}
+            </div>
+            <div style={{ padding: '10px', borderTop: '1px solid #1a1a1a' }}>
+              <div className="font-mono" style={{ fontSize: '8px', color: '#2a2a2a', textAlign: 'center', letterSpacing: '0.1em' }}>
+                ROW 2 / COL 2 IS THE LIVE RAW CAMERA FEED
+              </div>
             </div>
           </div>
+
+          {!isCompactLayout && (
+            <button
+              type="button"
+              aria-label="Resize camera feed panel"
+              onMouseDown={startResizingFeeds}
+              style={{
+                position: 'absolute',
+                top: '8px',
+                bottom: '8px',
+                right: '-10px',
+                width: '12px',
+                padding: 0,
+                border: 'none',
+                background: 'transparent',
+                cursor: 'col-resize',
+                zIndex: 8,
+              }}
+            >
+              <span style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: '5px',
+                width: '2px',
+                background: isResizingFeeds ? '#ff3131' : '#1a1a1a',
+                boxShadow: isResizingFeeds ? '0 0 8px rgba(255,49,49,0.8)' : 'none',
+              }} />
+            </button>
+          )}
         </div>
 
         {/* Center: Map
@@ -432,7 +587,82 @@ export default function DispatcherPage() {
 
         {/* Right: Radio Log */}
         <div className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
-          <div className="panel-header">RADIO LOG</div>
+          <div className="panel-header" style={{ justifyContent: 'space-between' }}>
+            <span>RADIO LOG</span>
+            {/* ── Mic Button ── */}
+            <button
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onMouseLeave={() => { if (isRecording) stopRecording() }}
+              className="font-mono"
+              style={{
+                background: isRecording ? '#2a0000' : 'transparent',
+                border: `1px solid ${isRecording ? '#ff3131' : '#2a2a2a'}`,
+                borderRadius: '3px',
+                color: isRecording ? '#ff3131' : '#666',
+                fontSize: '8px',
+                padding: '3px 8px',
+                cursor: 'pointer',
+                letterSpacing: '0.1em',
+                fontFamily: 'inherit',
+                transition: 'all 0.15s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                boxShadow: isRecording ? '0 0 8px rgba(255,49,49,0.4)' : 'none',
+              }}
+            >
+              <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
+                <rect x="3" y="0" width="4" height="7" rx="2"
+                  fill={isRecording ? '#ff3131' : '#666'}
+                  style={{ transition: 'fill 0.15s' }}
+                />
+                <path d="M1 6 Q1 10 5 10 Q9 10 9 6"
+                  stroke={isRecording ? '#ff3131' : '#666'}
+                  strokeWidth="1" fill="none"
+                  style={{ transition: 'stroke 0.15s' }}
+                />
+                <line x1="5" y1="10" x2="5" y2="13"
+                  stroke={isRecording ? '#ff3131' : '#666'}
+                  strokeWidth="1"
+                  style={{ transition: 'stroke 0.15s' }}
+                />
+              </svg>
+              {isRecording ? 'LIVE' : 'HOLD'}
+            </button>
+          </div>
+
+          {/* Interim transcript preview */}
+          {isRecording && (
+            <div style={{
+              padding: '6px 8px',
+              borderBottom: '1px solid #1a1a1a',
+              background: '#0a0000',
+            }}>
+              <div className="font-mono" style={{
+                fontSize: '8px', color: '#ff3131', letterSpacing: '0.1em',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}>
+                <span style={{
+                  width: '5px', height: '5px', borderRadius: '50%',
+                  background: '#ff3131',
+                  animation: 'pulse-dot 1s infinite',
+                  flexShrink: 0,
+                }} />
+                TRANSMITTING
+              </div>
+              {(interimText || finalTranscriptRef.current) && (
+                <div className="font-mono" style={{
+                  fontSize: '9px', color: '#c0c0c0', marginTop: '4px',
+                  fontStyle: 'italic',
+                }}>
+                  {finalTranscriptRef.current}{interimText}
+                </div>
+              )}
+            </div>
+          )}
+
+
           <div
             ref={logRef}
             style={{
@@ -570,11 +800,11 @@ function HBtn({ onClick, label, dim }: { onClick: () => void; label: string; dim
       }}
       onMouseEnter={e => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = '#ff3131'
-        ;(e.currentTarget as HTMLButtonElement).style.color = '#ff3131'
+          ; (e.currentTarget as HTMLButtonElement).style.color = '#ff3131'
       }}
       onMouseLeave={e => {
         (e.currentTarget as HTMLButtonElement).style.borderColor = dim ? '#1a1a1a' : '#2a2a2a'
-        ;(e.currentTarget as HTMLButtonElement).style.color = dim ? '#333' : '#a0a0a0'
+          ; (e.currentTarget as HTMLButtonElement).style.color = dim ? '#333' : '#a0a0a0'
       }}
     >
       {label}
@@ -661,7 +891,7 @@ function FeedTile({
           color: feed.kind === 'live' ? '#ff3131' : '#666',
           letterSpacing: '0.08em',
         }}>
-          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'YOUTUBE FEED'}
+          {feed.kind === 'live' ? (liveStream ? 'LIVE INPUT' : 'NO SIGNAL') : 'SIMULATED LIVE FEED'}
         </span>
         {statusText && (
           <span className="font-mono" style={{
@@ -686,24 +916,34 @@ function FeedViewport({
   liveStream: MediaStream | null
   liveFeedError: string | null
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
+  const liveVideoRef = useRef<HTMLVideoElement>(null)
+  const replayVideoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
-    const el = videoRef.current
+    const el = liveVideoRef.current
     if (!el || feed.kind !== 'live') return
     if (liveStream) {
       el.srcObject = liveStream
-      void el.play().catch(() => {})
+      void el.play().catch(() => { })
       return
     }
     el.srcObject = null
   }, [feed.kind, liveStream])
 
+  useEffect(() => {
+    const el = replayVideoRef.current
+    if (!el || feed.kind !== 'video') return
+    el.muted = true
+    el.defaultMuted = true
+    el.volume = 0
+    void el.play().catch(() => { })
+  }, [feed.kind, feed.src])
+
   if (feed.kind === 'live') {
     return (
       <>
         <video
-          ref={videoRef}
+          ref={liveVideoRef}
           autoPlay
           muted
           playsInline
@@ -734,13 +974,19 @@ function FeedViewport({
   }
 
   return (
-    <iframe
-      src={feed.src ?? YT_FALLBACK}
-      title={`${feed.id} video feed`}
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-      referrerPolicy="strict-origin-when-cross-origin"
-      allowFullScreen
-      style={{ width: '100%', height: '100%', border: 0, display: 'block' }}
+    <video
+      ref={replayVideoRef}
+      src={feed.src}
+      autoPlay
+      muted
+      loop
+      playsInline
+      disablePictureInPicture
+      controlsList="nodownload noplaybackrate noremoteplayback"
+      controls={false}
+      tabIndex={-1}
+      onContextMenu={e => e.preventDefault()}
+      style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
     />
   )
 }
