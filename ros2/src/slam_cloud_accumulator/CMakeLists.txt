@@ -15,7 +15,7 @@ find_package(tf2_sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 
-find_package(PCL REQUIRED COMPONENTS common io filters)
+find_package(PCL REQUIRED COMPONENTS common filters)
 
 add_executable(slam_cloud_accumulator src/slam_cloud_accumulator.cpp)
 

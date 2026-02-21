@@ -8,8 +8,6 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <mutex>
@@ -25,81 +23,92 @@ public:
   : Node("slam_cloud_accumulator"),
     tf_buffer_(this->get_clock()),
     tf_listener_(tf_buffer_),
-    accumulating_(false)
+    scans_since_refilter_(0)
   {
-    // Parameters
     this->declare_parameter("fixed_frame", "odom");
-    this->declare_parameter("voxel_size", 0.02f);
-    this->declare_parameter("sor_mean_k", 20);
-    this->declare_parameter("sor_std_dev", 2.0);
-    this->declare_parameter("output_dir", ".");
+    this->declare_parameter("input_topic", "/odin1/cloud_slam");
+    this->declare_parameter("voxel_size", 0.05);
+    this->declare_parameter("publish_hz", 2.0);
+    this->declare_parameter("refilter_every_n_scans", 10);
 
-    fixed_frame_ = this->get_parameter("fixed_frame").as_string();
-    voxel_size_  = static_cast<float>(this->get_parameter("voxel_size").as_double());
-    sor_mean_k_  = this->get_parameter("sor_mean_k").as_int();
-    sor_std_dev_ = this->get_parameter("sor_std_dev").as_double();
-    output_dir_  = this->get_parameter("output_dir").as_string();
+    fixed_frame_            = this->get_parameter("fixed_frame").as_string();
+    input_topic_            = this->get_parameter("input_topic").as_string();
+    voxel_size_             = static_cast<float>(this->get_parameter("voxel_size").as_double());
+    publish_hz_             = this->get_parameter("publish_hz").as_double();
+    refilter_every_n_scans_ = this->get_parameter("refilter_every_n_scans").as_int();
 
     accumulated_cloud_ = std::make_shared<pcl::PointCloud<pcl::PointXYZRGB>>();
+    voxel_.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
 
-    // Publishers
-    map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "/slam_cloud_accumulator/map", rclcpp::QoS(1).transient_local());
+    // Live cloud topic — reliable, depth 2; compatible with RViz and future frontends
+    cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "/slam_cloud_accumulator/cloud", rclcpp::QoS(2).reliable());
 
-    preview_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "/slam_cloud_accumulator/preview", rclcpp::SensorDataQoS());
-
-    preview_timer_ = this->create_wall_timer(
-      500ms, std::bind(&SlamCloudAccumulator::previewCallback, this));
-
-    // Subscription
     cloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/odin1/cloud_slam", rclcpp::SensorDataQoS(),
+      input_topic_, rclcpp::SensorDataQoS(),
       std::bind(&SlamCloudAccumulator::cloudCallback, this, std::placeholders::_1));
 
-    // Services
-    start_srv_ = this->create_service<std_srvs::srv::Trigger>(
-      "/start_accumulation",
-      std::bind(&SlamCloudAccumulator::startCallback, this,
-                std::placeholders::_1, std::placeholders::_2));
+    auto period_ms = std::chrono::milliseconds(static_cast<int>(1000.0 / publish_hz_));
+    publish_timer_ = this->create_wall_timer(
+      period_ms, std::bind(&SlamCloudAccumulator::publishCallback, this));
 
-    stop_srv_ = this->create_service<std_srvs::srv::Trigger>(
-      "/stop_and_save",
-      std::bind(&SlamCloudAccumulator::stopCallback, this,
+    reset_srv_ = this->create_service<std_srvs::srv::Trigger>(
+      "/slam_cloud_accumulator/reset",
+      std::bind(&SlamCloudAccumulator::resetCallback, this,
                 std::placeholders::_1, std::placeholders::_2));
 
     RCLCPP_INFO(this->get_logger(),
-      "slam_cloud_accumulator ready. Fixed frame: '%s'", fixed_frame_.c_str());
+      "slam_cloud_accumulator started. frame='%s', voxel=%.3f m, publish=%.1f Hz",
+      fixed_frame_.c_str(), voxel_size_, publish_hz_);
   }
 
 private:
-  // ── Cloud callback ──────────────────────────────────────────────────────────
+  // ── Incoming scan ────────────────────────────────────────────────────────────
   void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
   {
-    if (!accumulating_) return;
-
-    // Transform to fixed frame
-    sensor_msgs::msg::PointCloud2 transformed_msg;
+    sensor_msgs::msg::PointCloud2 transformed;
     try {
-      transformed_msg = tf_buffer_.transform(*msg, fixed_frame_, tf2::durationFromSec(0.1));
+      transformed = tf_buffer_.transform(*msg, fixed_frame_, tf2::durationFromSec(0.1));
     } catch (const tf2::TransformException & ex) {
       RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
         "TF transform failed: %s", ex.what());
       return;
     }
 
-    // Convert to PCL and append
-    pcl::PointCloud<pcl::PointXYZRGB> pcl_cloud;
-    pcl::fromROSMsg(transformed_msg, pcl_cloud);
+    pcl::PointCloud<pcl::PointXYZRGB> new_cloud;
+    pcl::fromROSMsg(transformed, new_cloud);
 
-    std::lock_guard<std::mutex> lock(cloud_mutex_);
-    *accumulated_cloud_ += pcl_cloud;
+    // Downsample the incoming scan before merging — keeps point density uniform
+    // and prevents any single scan from flooding the accumulated cloud.
+    pcl::PointCloud<pcl::PointXYZRGB> scan_filtered;
+    voxel_.setInputCloud(new_cloud.makeShared());
+    voxel_.filter(scan_filtered);
+
+    {
+      std::lock_guard<std::mutex> lock(cloud_mutex_);
+      *accumulated_cloud_ += scan_filtered;
+      scans_since_refilter_++;
+
+      // Periodically re-filter the whole accumulated cloud.
+      // This collapses duplicate/ghost points that pile up from SLAM drift
+      // and loop-closure corrections: once corrected scans land in the same
+      // voxel as the old ghost points, a single voxel-grid pass merges them.
+      if (scans_since_refilter_ >= refilter_every_n_scans_) {
+        pcl::PointCloud<pcl::PointXYZRGB> refiltered;
+        voxel_.setInputCloud(accumulated_cloud_);
+        voxel_.filter(refiltered);
+        *accumulated_cloud_ = std::move(refiltered);
+        scans_since_refilter_ = 0;
+        RCLCPP_DEBUG(this->get_logger(),
+          "Re-filtered accumulated cloud: %zu points", accumulated_cloud_->size());
+      }
+    }
   }
 
-  // ── Preview timer (2 Hz) ────────────────────────────────────────────────────
-  void previewCallback()
+  // ── Publish timer ────────────────────────────────────────────────────────────
+  void publishCallback()
   {
-    if (!accumulating_ || preview_pub_->get_subscription_count() == 0) return;
+    if (cloud_pub_->get_subscription_count() == 0) return;
 
     sensor_msgs::msg::PointCloud2 out_msg;
     {
@@ -109,108 +118,43 @@ private:
     }
     out_msg.header.frame_id = fixed_frame_;
     out_msg.header.stamp    = this->now();
-    preview_pub_->publish(out_msg);
+    cloud_pub_->publish(out_msg);
   }
 
-  // ── Start service ───────────────────────────────────────────────────────────
-  void startCallback(
+  // ── Reset service ────────────────────────────────────────────────────────────
+  void resetCallback(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
     std::lock_guard<std::mutex> lock(cloud_mutex_);
     accumulated_cloud_->clear();
-    accumulating_ = true;
+    scans_since_refilter_ = 0;
     response->success = true;
-    response->message = "Accumulation started.";
-    RCLCPP_INFO(this->get_logger(), "Accumulation started.");
+    response->message = "Accumulated cloud cleared.";
+    RCLCPP_INFO(this->get_logger(), "Accumulated cloud reset.");
   }
 
-  // ── Stop + process + save service ──────────────────────────────────────────
-  void stopCallback(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
-  {
-    accumulating_ = false;
-
-    pcl::PointCloud<pcl::PointXYZRGB>::Ptr processed(
-      new pcl::PointCloud<pcl::PointXYZRGB>);
-
-    {
-      std::lock_guard<std::mutex> lock(cloud_mutex_);
-      *processed = *accumulated_cloud_;
-    }
-
-    if (processed->empty()) {
-      response->success = false;
-      response->message = "No points accumulated.";
-      RCLCPP_WARN(this->get_logger(), "Stop called but no points were accumulated.");
-      return;
-    }
-
-    RCLCPP_INFO(this->get_logger(),
-      "Processing %zu points...", processed->size());
-
-    // 1. Downsample
-    pcl::VoxelGrid<pcl::PointXYZRGB> voxel;
-    voxel.setInputCloud(processed);
-    voxel.setLeafSize(voxel_size_, voxel_size_, voxel_size_);
-    voxel.filter(*processed);
-    RCLCPP_INFO(this->get_logger(), "After voxel filter: %zu points", processed->size());
-
-    // 2. Remove noise
-    pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> sor;
-    sor.setInputCloud(processed);
-    sor.setMeanK(sor_mean_k_);
-    sor.setStddevMulThresh(sor_std_dev_);
-    sor.filter(*processed);
-    RCLCPP_INFO(this->get_logger(), "After SOR filter: %zu points", processed->size());
-
-    // 3. Save with timestamp
-    auto now = std::chrono::system_clock::now();
-    auto t   = std::chrono::system_clock::to_time_t(now);
-    char ts[32];
-    std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", std::localtime(&t));
-    std::string filename = output_dir_ + "/slam_snapshot_" + ts + ".pcd";
-
-    if (pcl::io::savePCDFileBinary(filename, *processed) == 0) {
-      response->success = true;
-      response->message = "Saved to " + filename;
-      RCLCPP_INFO(this->get_logger(), "Cloud saved to: %s", filename.c_str());
-    } else {
-      response->success = false;
-      response->message = "Failed to save " + filename;
-      RCLCPP_ERROR(this->get_logger(), "Failed to save cloud to: %s", filename.c_str());
-    }
-
-    // 4. Publish as latched topic for RViz
-    sensor_msgs::msg::PointCloud2 out_msg;
-    pcl::toROSMsg(*processed, out_msg);
-    out_msg.header.frame_id = fixed_frame_;
-    out_msg.header.stamp    = this->now();
-    map_pub_->publish(out_msg);
-    RCLCPP_INFO(this->get_logger(), "Published map cloud on /slam_cloud_accumulator/map");
-  }
-
-  // ── Members ─────────────────────────────────────────────────────────────────
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    map_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    preview_pub_;
-  rclcpp::TimerBase::SharedPtr                                   preview_timer_;
+  // ── Members ──────────────────────────────────────────────────────────────────
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr    cloud_pub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_srv_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr stop_srv_;
+  rclcpp::TimerBase::SharedPtr                                   publish_timer_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr             reset_srv_;
 
-  tf2_ros::Buffer           tf_buffer_;
+  tf2_ros::Buffer            tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
+
+  // Reused voxel filter instance — setLeafSize called once at startup
+  pcl::VoxelGrid<pcl::PointXYZRGB> voxel_;
 
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr accumulated_cloud_;
   std::mutex cloud_mutex_;
-  bool       accumulating_;
+  int        scans_since_refilter_;
 
   std::string fixed_frame_;
+  std::string input_topic_;
   float       voxel_size_;
-  int         sor_mean_k_;
-  double      sor_std_dev_;
-  std::string output_dir_;
+  double      publish_hz_;
+  int         refilter_every_n_scans_;
 };
 
 int main(int argc, char ** argv)
