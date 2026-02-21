@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import Link from 'next/link'
 import RosPointCloud from '@/components/three-scene'
+import CameraWebSocketFeed from '@/components/camera-websocket-feed'
 import { ThreeScene as BuildingSchematic } from './ThreeScene'
 
 // ─── Canvas constants ───────────────────────────────────────────────
@@ -1473,37 +1474,8 @@ function FeedViewport({
   }, [feed.kind, initialSeekTime])
 
   if (feed.kind === 'live') {
-    return (
-      <>
-        <video
-          ref={liveVideoRef}
-          autoPlay
-          muted
-          playsInline
-          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
-        />
-        {!liveStream && (
-          <div style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'grid',
-            placeItems: 'center',
-            background: 'rgba(0,0,0,0.7)',
-            padding: '8px',
-          }}>
-            <span className="font-mono" style={{
-              color: '#666',
-              fontSize: '8px',
-              letterSpacing: '0.12em',
-              textAlign: 'center',
-              lineHeight: 1.6,
-            }}>
-              {liveFeedError ?? 'INITIALIZING CAMERA'}
-            </span>
-          </div>
-        )}
-      </>
-    )
+    // Use WebSocket camera feed from ROS2 backend
+    return <CameraWebSocketFeed showStatus={false} />;
   }
 
   return (
