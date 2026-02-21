@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { WebSocketManager, PointCloudData, ConnectionStatus } from '@/lib/websocket-manager';
@@ -181,6 +181,11 @@ export default function ThreeScene({
 
     // Create point cloud mesh
     const pointCloud = new THREE.Points(geometry, material);
+
+    // Rotate point cloud to convert from ROS coordinate system (Z-up) to Three.js (Y-up)
+    // Apply -90 degree rotation around X-axis to convert Z-up to Y-up
+    pointCloud.rotation.x = -Math.PI / 2;
+
     sceneRef.current.add(pointCloud);
     pointCloudRef.current = pointCloud;
 

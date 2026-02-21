@@ -191,6 +191,7 @@ export default function DispatcherPage() {
   const [radioAutoFollow, setRadioAutoFollow] = useState(true)
   const [mapSplitPercent, setMapSplitPercent] = useState(60) // top panel gets 60%
   const [isResizingMap, setIsResizingMap] = useState(false)
+  const [waypointMode, setWaypointMode] = useState(false) // Toggle for waypoint placement mode
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapResizeStartRef = useRef<{ y: number; pct: number } | null>(null)
   const startRef = useRef(0)
@@ -448,8 +449,8 @@ export default function DispatcherPage() {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    drawMap(ctx, state, waypointPreview, dragWaypoint, tick)
-  }, [state, waypointPreview, dragWaypoint, tick])
+    drawMap(ctx, state, waypointMode ? waypointPreview : null, dragWaypoint, tick)
+  }, [state, waypointPreview, dragWaypoint, tick, waypointMode])
 
   // Canvas coordinate conversion
   const toCanvas = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -787,15 +788,37 @@ export default function DispatcherPage() {
         */}
         <div ref={mapContainerRef} className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           {/* ── Top: Live ROS Point Cloud ── */}
-          <div className="panel-header" style={{ justifyContent: 'space-between' }}>
+          <div className="panel-header" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span>Map</span>
-            <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
-              {dragWaypoint
-                ? 'DRAGGING WAYPOINT'
-                : state.waypoint
-                  ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
-                  : 'NO WAYPOINT'}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <button
+                type="button"
+                onClick={() => setWaypointMode(!waypointMode)}
+                className="font-mono"
+                style={{
+                  background: waypointMode ? '#2a0000' : 'transparent',
+                  border: `1px solid ${waypointMode ? '#ff3131' : '#2a2a2a'}`,
+                  borderRadius: '3px',
+                  color: waypointMode ? '#ff3131' : '#666',
+                  fontSize: '8px',
+                  padding: '3px 8px',
+                  cursor: 'pointer',
+                  letterSpacing: '0.1em',
+                  fontFamily: 'inherit',
+                  transition: 'all 0.15s',
+                  boxShadow: waypointMode ? '0 0 8px rgba(255,49,49,0.4)' : 'none',
+                }}
+              >
+                {waypointMode ? '✓ WAYPOINT MODE' : 'WAYPOINT MODE'}
+              </button>
+              <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
+                {dragWaypoint
+                  ? 'DRAGGING WAYPOINT'
+                  : state.waypoint
+                    ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
+                    : 'NO WAYPOINT'}
+              </span>
+            </div>
           </div>
           <div style={{ flex: `${mapSplitPercent} 0 0%`, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
             <RosPointCloud />
@@ -808,15 +831,17 @@ export default function DispatcherPage() {
               style={{
                 position: 'absolute', inset: 0,
                 width: '100%', height: '100%',
-                cursor: isDraggingWaypoint ? 'grabbing' : canvasCursor, display: 'block',
+                cursor: waypointMode ? (isDraggingWaypoint ? 'grabbing' : canvasCursor) : 'default',
+                display: 'block',
                 zIndex: 1,
                 background: 'transparent',
+                pointerEvents: waypointMode ? 'auto' : 'none', // Allow Three.js controls when not in waypoint mode
               }}
-              onMouseDown={handleCanvasMouseDown}
-              onMouseUp={handleCanvasMouseUp}
-              onClick={handleCanvasClick}
-              onMouseMove={handleCanvasMove}
-              onMouseLeave={handleCanvasLeave}
+              onMouseDown={waypointMode ? handleCanvasMouseDown : undefined}
+              onMouseUp={waypointMode ? handleCanvasMouseUp : undefined}
+              onClick={waypointMode ? handleCanvasClick : undefined}
+              onMouseMove={waypointMode ? handleCanvasMove : undefined}
+              onMouseLeave={waypointMode ? handleCanvasLeave : undefined}
             />
           </div>
 
