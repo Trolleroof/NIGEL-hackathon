@@ -184,7 +184,7 @@ public:
     this->declare_parameter("refilter_every_n_scans", 10);
     this->declare_parameter("ws_port",                9090);
     // camera
-    this->declare_parameter("image_topic",            "/odin1/image/undistored");
+    this->declare_parameter("image_topic",            "/odin1/image/undistorted");
     this->declare_parameter("image_hz",               10.0);
     this->declare_parameter("jpeg_quality",           80);
     this->declare_parameter("image_scale",            1.0);
