@@ -24,6 +24,7 @@ export default function CameraWebSocketFeed({
   const [fps, setFps] = useState<number>(0);
   const lastFrameTimeRef = useRef<number>(0);
   const frameTimesRef = useRef<number[]>([]);
+  const currentFrameRef = useRef<string | null>(null);
 
   useEffect(() => {
     // Initialize WebSocket connection
@@ -45,6 +46,12 @@ export default function CameraWebSocketFeed({
 
     // Cleanup on unmount
     return () => {
+      // Revoke current blob URL to prevent memory leak
+      if (currentFrameRef.current) {
+        URL.revokeObjectURL(currentFrameRef.current);
+        currentFrameRef.current = null;
+      }
+
       if (wsRef.current) {
         wsRef.current.disconnect();
       }
@@ -55,6 +62,12 @@ export default function CameraWebSocketFeed({
    * Handle incoming camera frame
    */
   const handleFrame = (data: CameraFrameData) => {
+    // Clean up previous frame's blob URL to prevent memory leak
+    if (currentFrameRef.current && currentFrameRef.current !== data.blobUrl) {
+      URL.revokeObjectURL(currentFrameRef.current);
+    }
+
+    currentFrameRef.current = data.blobUrl;
     setCurrentFrame(data.blobUrl);
     setFrameCount(data.frameNumber);
 

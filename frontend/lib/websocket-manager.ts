@@ -49,6 +49,7 @@ export interface WebSocketManagerConfig {
   onMessage?: (data: PointCloudData) => void; // deprecated, use onPointCloud
   onStatusChange?: (status: ConnectionStatus) => void;
   onError?: (error: Event) => void;
+  onDisconnect?: () => void; // Called when connection is lost
 }
 
 export class WebSocketManager {
@@ -70,6 +71,7 @@ export class WebSocketManager {
       onMessage: () => {},
       onStatusChange: () => {},
       onError: () => {},
+      onDisconnect: () => {},
       ...config,
     };
   }
@@ -192,6 +194,7 @@ export class WebSocketManager {
   private handleClose(): void {
     console.log('WebSocket closed');
     this.updateStatus('disconnected');
+    this.config.onDisconnect?.();
     this.scheduleReconnect();
   }
 

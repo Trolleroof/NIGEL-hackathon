@@ -38,6 +38,8 @@ export default function ThreeScene({
   const [pointCount, setPointCount] = useState<number>(0);
   const [lastUpdateTime, setLastUpdateTime] = useState<number>(0);
   const [sceneLoadError, setSceneLoadError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [hasReceivedData, setHasReceivedData] = useState<boolean>(false);
 
   // Zustand store actions and state
   const setCurrentPosition = useSlamStore((state) => state.setCurrentPosition);
@@ -52,7 +54,11 @@ export default function ThreeScene({
     const THREE = threeRef.current;
     if (!THREE || !sceneRef.current) return;
 
-    // Remove old point cloud if it exists
+    // Mark that we've received data
+    setIsLoading(false);
+    setHasReceivedData(true);
+
+    // Remove old point cloud if it exists (memory cleanup)
     if (pointCloudRef.current) {
       sceneRef.current.remove(pointCloudRef.current);
       pointCloudRef.current.geometry.dispose();
@@ -61,6 +67,7 @@ export default function ThreeScene({
       } else {
         pointCloudRef.current.material.dispose();
       }
+      pointCloudRef.current = null;
     }
 
     if (data.pointCount === 0) {
@@ -160,11 +167,22 @@ export default function ThreeScene({
       timestamp: data.timestamp,
     });
 
-    if (data.pointCount === 0) return;
+    if (data.pointCount === 0) {
+      // Hide breadcrumb line if no data
+      if (breadcrumbLineRef.current) {
+        breadcrumbLineRef.current.visible = false;
+      }
+      return;
+    }
 
-    // Create or update breadcrumb line
+    // Create breadcrumb line on first data
     if (!breadcrumbLineRef.current) {
       const geometry = new THREE.BufferGeometry();
+      // Pre-allocate buffer for max expected path points (10000 from backend default)
+      const maxPoints = 10000;
+      const emptyPositions = new Float32Array(maxPoints * 3);
+      geometry.setAttribute('position', new THREE.BufferAttribute(emptyPositions, 3));
+
       const material = new THREE.LineBasicMaterial({
         color: 0x00ff88, // Bright green for visibility
         linewidth: 2,
@@ -189,13 +207,30 @@ export default function ThreeScene({
       convertedPositions[i * 3 + 2] = -rosY; // Three.js Z = -ROS Y
     }
 
-    // Update line geometry
+    // Reuse geometry buffer - update positions without recreating (memory optimization)
     const geometry = breadcrumbLineRef.current.geometry;
-    geometry.setAttribute('position', new THREE.BufferAttribute(convertedPositions, 3));
+    const positionAttr = geometry.getAttribute('position') as any;
+
+    // Update the existing buffer
+    for (let i = 0; i < convertedPositions.length; i++) {
+      positionAttr.array[i] = convertedPositions[i];
+    }
+
     geometry.setDrawRange(0, data.pointCount);
-    geometry.attributes.position.needsUpdate = true;
+    positionAttr.needsUpdate = true;
     geometry.computeBoundingSphere();
+
+    breadcrumbLineRef.current.visible = true;
   }, [setBreadcrumbTrail]);
+
+  const handleDisconnect = useCallback(() => {
+    console.log('WebSocket disconnected - stopping updates');
+    setIsLoading(true);
+    setHasReceivedData(false);
+
+    // Don't clear the scene immediately - let it stay visible with last known data
+    // This prevents the demo from looking broken during temporary disconnects
+  }, []);
 
   const initWebSocket = useCallback(() => {
     const wsManager = new WebSocketManager({
@@ -208,14 +243,16 @@ export default function ThreeScene({
       onOdometry: handleOdometryData,
       onPath: handlePathData,
       onStatusChange: setConnectionStatus,
+      onDisconnect: handleDisconnect,
       onError: (error) => {
         console.error('WebSocket error:', error);
+        setSceneLoadError(null); // Don't show error, auto-reconnect will handle it
       },
     });
 
     wsManager.connect();
     wsManagerRef.current = wsManager;
-  }, [wsHost, wsPort, handlePointCloudData, handleOdometryData, handlePathData]);
+  }, [wsHost, wsPort, handlePointCloudData, handleOdometryData, handlePathData, handleDisconnect]);
 
   const animate = useCallback(() => {
     animationFrameRef.current = requestAnimationFrame(animate);
@@ -489,7 +526,31 @@ export default function ThreeScene({
     <div className={`relative w-full h-full ${className}`}>
       <div ref={containerRef} className="w-full h-full" />
 
-      {showOverlay && (
+      {/* Loading overlay */}
+      {isLoading && !hasReceivedData && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-black/80 text-white px-6 py-4 rounded-lg text-center font-mono">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-4 h-4 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
+              <span className="text-sm">
+                {connectionStatus === 'connecting' ? 'Connecting' : 'Waiting for data...'}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reconnecting overlay (when we had data but lost connection) */}
+      {connectionStatus === 'disconnected' && hasReceivedData && (
+        <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-red-900/90 text-white px-4 py-2 rounded-lg text-sm font-mono">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            <span>Connection lost - Reconnecting...</span>
+          </div>
+        </div>
+      )}
+
+      {showOverlay && !isLoading && (
         <>
           <div className="absolute top-4 left-4 bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-mono space-y-1">
             <div className="flex items-center gap-2">
