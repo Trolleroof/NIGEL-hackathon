@@ -195,30 +195,7 @@ function drawMap(
     ctx.fillText('TARGET', x + 10, y - 10)
   }
 
-  // FF dot
-  const { x, y } = state.firefighterPosition
-  const glow = 0.7 + 0.3 * Math.sin(tick * 0.05)
-  ctx.shadowColor = '#ff3131'
-  ctx.shadowBlur = 12 * glow
-  ctx.fillStyle = '#ff3131'
-  ctx.beginPath()
-  ctx.arc(x, y, 7, 0, Math.PI * 2)
-  ctx.fill()
-  ctx.shadowBlur = 0
-
-  ctx.strokeStyle = `rgba(255,49,49,0.4)`
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.arc(x, y, 12, 0, Math.PI * 2)
-  ctx.stroke()
-
-  ctx.fillStyle = '#fff'
-  ctx.font = 'bold 9px "Space Mono", monospace'
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'alphabetic'
-  ctx.fillText('FF1', x + 14, y + 4)
-
-  ctx.textAlign = 'left'
+  // FF marker intentionally omitted from the overlay
 }
 
 // ─── Main component ──────────────────────────────────────────────────

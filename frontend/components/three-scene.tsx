@@ -132,7 +132,8 @@ export default function ThreeScene({
       });
       const cone = new THREE.Mesh(geometry, material);
 
-      // Position cone so the tip is at the origin (bottom of cone at firefighter position)
+      // Position cone so the tip is at the origin, but inverted
+      cone.rotation.x = Math.PI;
       cone.position.y = 0.25; // Half the cone height
 
       const markerGroup = new THREE.Group();
