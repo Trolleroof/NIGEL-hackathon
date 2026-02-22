@@ -10,6 +10,10 @@ interface ThreeSceneProps {
   wsPort?: number;
   className?: string;
   showOverlay?: boolean;
+  waypoint?: { x: number; y: number } | null;
+  waypointMode?: boolean;
+  onClickGround?: (worldX: number, worldZ: number) => void;
+  onOdometry?: (data: OdometryData) => void;
 }
 
 const THREE_CDN_URL = 'https://esm.sh/three@0.183.1';
@@ -20,6 +24,10 @@ export default function ThreeScene({
   wsPort = parseInt(process.env.NEXT_PUBLIC_WS_PORT_POINTCLOUD || '9090'),
   className = '',
   showOverlay = true,
+  waypoint = null,
+  waypointMode = false,
+  onClickGround,
+  onOdometry,
 }: ThreeSceneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<any>(null);
@@ -33,6 +41,15 @@ export default function ThreeScene({
   const animationFrameRef = useRef<number | null>(null);
   const threeRef = useRef<any>(null);
   const orbitControlsCtorRef = useRef<any>(null);
+  const groundPlaneRef = useRef<any>(null);
+  const externalWaypointRef = useRef<any>(null);
+  const waypointModeRef = useRef(waypointMode);
+  const onClickGroundRef = useRef(onClickGround);
+  const onOdometryRef = useRef(onOdometry);
+
+  useEffect(() => { waypointModeRef.current = waypointMode; }, [waypointMode]);
+  useEffect(() => { onClickGroundRef.current = onClickGround; }, [onClickGround]);
+  useEffect(() => { onOdometryRef.current = onOdometry; }, [onOdometry]);
 
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [pointCount, setPointCount] = useState<number>(0);
@@ -45,7 +62,6 @@ export default function ThreeScene({
   const setCurrentPosition = useSlamStore((state) => state.setCurrentPosition);
   const setBreadcrumbTrail = useSlamStore((state) => state.setBreadcrumbTrail);
   const waypoints = useSlamStore((state) => state.waypoints);
-  const addWaypoint = useSlamStore((state) => state.addWaypoint);
 
   // Waypoint markers (refs for each waypoint)
   const waypointMarkersRef = useRef<Map<string, any>>(new Map());
@@ -154,6 +170,7 @@ export default function ThreeScene({
     // In ROS: X=forward, Y=left, Z=up
     // In Three.js: X=right, Y=up, Z=forward
     firefighterMarkerRef.current.position.set(data.x, data.z, -data.y);
+    onOdometryRef.current?.(data);
   }, [setCurrentPosition]);
 
   const handlePathData = useCallback((data: PathData) => {
@@ -261,6 +278,23 @@ export default function ThreeScene({
       controlsRef.current.update();
     }
 
+    // Animate external waypoint marker
+    const wpGroup = externalWaypointRef.current;
+    if (wpGroup && wpGroup.visible) {
+      const t = Date.now() * 0.002;
+      // Rotate the diamond (child at index 1)
+      const diamond = wpGroup.children[1];
+      if (diamond) diamond.rotation.y = t * 1.5;
+      // Pulse the outer ring (child with userData.isOuterRing)
+      for (const child of wpGroup.children) {
+        if (child.userData?.isOuterRing) {
+          const pulse = 0.8 + 0.4 * Math.sin(t * 3);
+          child.scale.set(pulse, pulse, pulse);
+          if (child.material) child.material.opacity = 0.15 + 0.2 * Math.sin(t * 3);
+        }
+      }
+    }
+
     if (sceneRef.current && cameraRef.current && rendererRef.current) {
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
@@ -337,6 +371,8 @@ export default function ThreeScene({
 
     sceneRef.current = null;
     cameraRef.current = null;
+    groundPlaneRef.current = null;
+    externalWaypointRef.current = null;
   }, []);
 
   const initializeScene = useCallback(async () => {
@@ -392,6 +428,85 @@ export default function ThreeScene({
     directionalLight.position.set(5, 10, 5);
     scene.add(directionalLight);
 
+    // Invisible plane for optional waypoint click picking.
+    const groundGeo = new THREE.PlaneGeometry(500, 500);
+    const groundMat = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+    const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.rotation.x = -Math.PI / 2;
+    scene.add(groundMesh);
+    groundPlaneRef.current = groundMesh;
+
+    // External waypoint marker used by dispatcher/firefighter pages.
+    const waypointGroup = new THREE.Group();
+
+    // Pole
+    const poleGeo = new THREE.CylinderGeometry(0.04, 0.04, 1.6, 8);
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0xff3131, emissive: 0xff3131, emissiveIntensity: 0.4 });
+    const pole = new THREE.Mesh(poleGeo, poleMat);
+    pole.position.y = 0.8;
+    waypointGroup.add(pole);
+
+    // Diamond on top (larger, emissive)
+    const diamondGeo = new THREE.OctahedronGeometry(0.22, 0);
+    const diamondMat = new THREE.MeshStandardMaterial({ color: 0xff3131, emissive: 0xff3131, emissiveIntensity: 0.8 });
+    const diamond = new THREE.Mesh(diamondGeo, diamondMat);
+    diamond.position.y = 1.82;
+    waypointGroup.add(diamond);
+
+    // Inner ground ring
+    const innerRingGeo = new THREE.RingGeometry(0.2, 0.28, 32);
+    const innerRingMat = new THREE.MeshBasicMaterial({ color: 0xff3131, side: THREE.DoubleSide, transparent: true, opacity: 0.7 });
+    const innerRing = new THREE.Mesh(innerRingGeo, innerRingMat);
+    innerRing.rotation.x = -Math.PI / 2;
+    innerRing.position.y = 0.01;
+    waypointGroup.add(innerRing);
+
+    // Outer pulsing ring (animated in render loop)
+    const outerRingGeo = new THREE.RingGeometry(0.45, 0.52, 32);
+    const outerRingMat = new THREE.MeshBasicMaterial({ color: 0xff3131, side: THREE.DoubleSide, transparent: true, opacity: 0.3 });
+    const outerRing = new THREE.Mesh(outerRingGeo, outerRingMat);
+    outerRing.rotation.x = -Math.PI / 2;
+    outerRing.position.y = 0.01;
+    outerRing.userData.isOuterRing = true;
+    waypointGroup.add(outerRing);
+
+    // Crosshair arms at base
+    const armGeo = new THREE.BoxGeometry(0.8, 0.02, 0.04);
+    const armMat = new THREE.MeshBasicMaterial({ color: 0xff3131, transparent: true, opacity: 0.5 });
+    const armX = new THREE.Mesh(armGeo, armMat);
+    armX.position.y = 0.01;
+    waypointGroup.add(armX);
+    const armZ = new THREE.Mesh(armGeo.clone(), armMat.clone());
+    armZ.rotation.y = Math.PI / 2;
+    armZ.position.y = 0.01;
+    waypointGroup.add(armZ);
+
+    // Point light at diamond tip for glow effect
+    const wpLight = new THREE.PointLight(0xff3131, 2, 4);
+    wpLight.position.y = 1.82;
+    waypointGroup.add(wpLight);
+
+    waypointGroup.visible = false;
+    scene.add(waypointGroup);
+    externalWaypointRef.current = waypointGroup;
+
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    const handlePointerDown = (evt: MouseEvent) => {
+      if (!waypointModeRef.current || !onClickGroundRef.current) return;
+      if (!groundPlaneRef.current || !cameraRef.current || !rendererRef.current) return;
+
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(mouse, cameraRef.current);
+      const hits = raycaster.intersectObject(groundPlaneRef.current, false);
+      if (!hits.length) return;
+      const p = hits[0].point;
+      onClickGroundRef.current(p.x, p.z);
+    };
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
+
     const handleResize = () => {
       if (!containerRef.current || !cameraRef.current || !rendererRef.current) return;
       const newWidth = containerRef.current.clientWidth;
@@ -402,8 +517,22 @@ export default function ThreeScene({
     };
 
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
+    };
   }, []);
+
+  // Keep optional external waypoint marker synced.
+  useEffect(() => {
+    if (!externalWaypointRef.current) return;
+    if (waypoint) {
+      externalWaypointRef.current.position.set(waypoint.x, 0, waypoint.y);
+      externalWaypointRef.current.visible = true;
+      return;
+    }
+    externalWaypointRef.current.visible = false;
+  }, [waypoint]);
 
   // Sync waypoints from Zustand store to Three.js scene
   useEffect(() => {

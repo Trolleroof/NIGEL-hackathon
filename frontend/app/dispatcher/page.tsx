@@ -5,9 +5,6 @@ import RosPointCloud from '@/components/three-scene'
 import CameraWebSocketFeed from '@/components/camera-websocket-feed'
 import { ThreeScene as BuildingSchematic } from './ThreeScene'
 
-// ─── Canvas constants ───────────────────────────────────────────────
-const CW = 900
-const CH = 500
 const DEFAULT_RIGHT_PANEL_WIDTH = 240
 const DEFAULT_LEFT_PANEL_WIDTH = 310
 const MIN_LEFT_PANEL_WIDTH = 280
@@ -102,122 +99,19 @@ function fireAgent(trigger: 'radio_message' | 'heartbeat' | 'status_change', mes
   }).catch(() => {})
 }
 
-// ─── Canvas draw ─────────────────────────────────────────────────────
-function drawMap(
-  ctx: CanvasRenderingContext2D,
-  state: State,
-  waypointPreview: Pos | null,
-  dragWaypoint: Pos | null,
-  tick: number,
-) {
-  ctx.clearRect(0, 0, CW, CH)
-
-  // Breadcrumbs
-  const crumbs = state.breadcrumbs
-  for (let i = 0; i < crumbs.length; i++) {
-    const alpha = (i / crumbs.length) * 0.6
-    ctx.fillStyle = `rgba(255,49,49,${alpha})`
-    ctx.beginPath()
-    ctx.arc(crumbs[i].x, crumbs[i].y, 2.5, 0, Math.PI * 2)
-    ctx.fill()
-  }
-
-  // ── Hazard markers ──
-  for (const hazard of (state.hazards ?? [])) {
-    if (!hazard.active) continue
-    const { x, y } = hazard.position
-    const pulse = 0.5 + 0.5 * Math.sin(tick * 0.06)
-
-    ctx.beginPath()
-    ctx.arc(x, y, 18 + pulse * 4, 0, Math.PI * 2)
-    ctx.strokeStyle = `rgba(255,165,0,${0.2 * pulse})`
-    ctx.lineWidth = 1.5
-    ctx.stroke()
-
-    ctx.beginPath()
-    ctx.arc(x, y, 10, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(255,165,0,${0.3 + 0.2 * pulse})`
-    ctx.fill()
-    ctx.strokeStyle = `rgba(255,165,0,0.7)`
-    ctx.lineWidth = 1.5
-    ctx.stroke()
-
-    ctx.fillStyle = '#fff'
-    ctx.font = 'bold 12px "Space Mono", monospace'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText('!', x, y)
-
-    ctx.font = '7px "Space Mono", monospace'
-    ctx.fillStyle = '#ffa500'
-    ctx.textAlign = 'left'
-    ctx.textBaseline = 'alphabetic'
-    ctx.fillText(hazard.label.toUpperCase().slice(0, 20), x + 14, y - 6)
-  }
-
-  // Waypoint preview
-  if (waypointPreview) {
-    ctx.strokeStyle = 'rgba(255,49,49,0.3)'
-    ctx.lineWidth = 1
-    const s = 12
-    ctx.beginPath()
-    ctx.moveTo(waypointPreview.x - s, waypointPreview.y)
-    ctx.lineTo(waypointPreview.x + s, waypointPreview.y)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.moveTo(waypointPreview.x, waypointPreview.y - s)
-    ctx.lineTo(waypointPreview.x, waypointPreview.y + s)
-    ctx.stroke()
-  }
-
-  // Waypoint
-  const activeWaypoint = dragWaypoint ?? state.waypoint
-  if (activeWaypoint) {
-    const { x, y } = activeWaypoint
-    const pulse = 0.6 + 0.4 * Math.sin(tick * 0.08)
-    ctx.strokeStyle = `rgba(255,49,49,${pulse})`
-    ctx.lineWidth = 1.5
-    const s = 14
-    ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(x, y, 6, 0, Math.PI * 2)
-    ctx.strokeStyle = `rgba(255,49,49,${pulse * 0.8})`
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.arc(x, y, 16 + Math.sin(tick * 0.1) * 3, 0, Math.PI * 2)
-    ctx.strokeStyle = `rgba(255,49,49,${0.2 * pulse})`
-    ctx.stroke()
-    ctx.font = '8px "Space Mono", monospace'
-    ctx.fillStyle = '#ff3131'
-    ctx.textAlign = 'left'
-    ctx.textBaseline = 'alphabetic'
-    ctx.fillText('TARGET', x + 10, y - 10)
-  }
-
-  // FF marker intentionally omitted from the overlay
-}
-
 // ─── Main component ──────────────────────────────────────────────────
 export default function DispatcherPage() {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const [state, setState] = useState<State>({
     firefighterPosition: { x: 435, y: 400 },
     waypoint: null, radioLog: [], firefighterStatus: 'OK', breadcrumbs: [],
     hazards: [], tasks: [], alerts: [], airSupply: 100, roomsCleared: [],
     missionStartTime: new Date().toISOString(), agentProcessing: false,
   })
-  const [waypointPreview, setWaypointPreview] = useState<Pos | null>(null)
-  const [dragWaypoint, setDragWaypoint] = useState<Pos | null>(null)
-  const [isDraggingWaypoint, setIsDraggingWaypoint] = useState(false)
-  const [canvasCursor, setCanvasCursor] = useState<'crosshair' | 'grab' | 'grabbing'>('crosshair')
-  const [tick, setTick] = useState(0)
   const [time, setTime] = useState('')
   const [elapsed, setElapsed] = useState(0)
   const [expandedFeedId, setExpandedFeedId] = useState<string | null>(null)
   const [expandedFeedSeekTime, setExpandedFeedSeekTime] = useState(0)
   const [liveStream, setLiveStream] = useState<MediaStream | null>(null)
-  const [liveFeedError, setLiveFeedError] = useState<string | null>(null)
   const [isCompactLayout, setIsCompactLayout] = useState(false)
   const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH)
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH)
@@ -236,9 +130,6 @@ export default function DispatcherPage() {
   const resizeStartRef = useRef<{ x: number; width: number } | null>(null)
   const radioResizeStartRef = useRef<{ x: number; width: number } | null>(null)
   const lastSeenRadioCountRef = useRef(0)
-  const skipCanvasClickRef = useRef(false)
-  const dragWaypointRef = useRef<Pos | null>(null)
-  const isDraggingWaypointRef = useRef(false)
   const lastSpokenIdRef = useRef(0)
   const expandedFeed = CAMERA_FEEDS.find(feed => feed.id === expandedFeedId) ?? null
 
@@ -268,14 +159,13 @@ export default function DispatcherPage() {
   const recognitionRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
 
-  // Clock + tick
+  // Clock
   useEffect(() => {
     startRef.current = Date.now()
     const id = setInterval(() => {
-      setTick(t => t + 1)
       setTime(new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }))
       setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
-    }, 100)
+    }, 1000)
     return () => clearInterval(id)
   }, [])
 
@@ -325,7 +215,6 @@ export default function DispatcherPage() {
 
     const initCamera = async () => {
       if (!navigator.mediaDevices?.getUserMedia) {
-        setLiveFeedError('CAMERA API UNAVAILABLE')
         return
       }
 
@@ -341,9 +230,8 @@ export default function DispatcherPage() {
         }
 
         setLiveStream(stream)
-        setLiveFeedError(null)
       } catch {
-        setLiveFeedError('CAMERA ACCESS BLOCKED')
+        // ignore
       }
     }
 
@@ -507,30 +395,6 @@ export default function DispatcherPage() {
     if (nearBottom) lastSeenRadioCountRef.current = filteredRadioLog.length
   }, [filteredRadioLog.length])
 
-  // Draw canvas
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    drawMap(ctx, state, waypointMode ? waypointPreview : null, dragWaypoint, tick)
-  }, [state, waypointPreview, dragWaypoint, tick, waypointMode])
-
-  // Canvas coordinate conversion
-  const toCanvas = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current!
-    const rect = canvas.getBoundingClientRect()
-    return {
-      x: (e.clientX - rect.left) * (CW / rect.width),
-      y: (e.clientY - rect.top) * (CH / rect.height),
-    }
-  }, [])
-
-  const isNearWaypoint = useCallback((pos: Pos, waypoint: Pos | null) => {
-    if (!waypoint) return false
-    return Math.hypot(pos.x - waypoint.x, pos.y - waypoint.y) <= 18
-  }, [])
-
   const placeWaypoint = useCallback(async (pos: Pos) => {
     await fetch('/api/state', {
       method: 'POST',
@@ -539,80 +403,9 @@ export default function DispatcherPage() {
     })
   }, [])
 
-  const commitDraggedWaypoint = useCallback(async () => {
-    if (!isDraggingWaypointRef.current) return
-    isDraggingWaypointRef.current = false
-    setIsDraggingWaypoint(false)
-    setCanvasCursor('crosshair')
-    const dropped = dragWaypointRef.current
-    setDragWaypoint(null)
-    dragWaypointRef.current = null
-    if (dropped) await placeWaypoint(dropped)
+  const handleGroundClick = useCallback((worldX: number, worldZ: number) => {
+    void placeWaypoint({ x: worldX, y: worldZ })
   }, [placeWaypoint])
-
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const pos = toCanvas(e)
-    const currentWaypoint = dragWaypointRef.current ?? state.waypoint
-    if (!isNearWaypoint(pos, currentWaypoint)) {
-      skipCanvasClickRef.current = false
-      return
-    }
-
-    skipCanvasClickRef.current = true
-    isDraggingWaypointRef.current = true
-    setIsDraggingWaypoint(true)
-    setCanvasCursor('grabbing')
-    dragWaypointRef.current = currentWaypoint
-    setDragWaypoint(currentWaypoint)
-    setWaypointPreview(currentWaypoint)
-  }, [toCanvas, state.waypoint, isNearWaypoint])
-
-  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (skipCanvasClickRef.current) {
-      skipCanvasClickRef.current = false
-      return
-    }
-    const pos = toCanvas(e)
-    await placeWaypoint(pos)
-  }, [toCanvas, placeWaypoint])
-
-  const handleCanvasMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const pos = toCanvas(e)
-    if (isDraggingWaypointRef.current) {
-      dragWaypointRef.current = pos
-      setDragWaypoint(pos)
-      setWaypointPreview(pos)
-      return
-    }
-
-    setWaypointPreview(pos)
-    const currentWaypoint = dragWaypointRef.current ?? state.waypoint
-    setCanvasCursor(isNearWaypoint(pos, currentWaypoint) ? 'grab' : 'crosshair')
-  }, [toCanvas, state.waypoint, isNearWaypoint])
-
-  const handleCanvasMouseUp = useCallback(() => {
-    void commitDraggedWaypoint()
-  }, [commitDraggedWaypoint])
-
-  const handleCanvasLeave = useCallback(() => {
-    setWaypointPreview(null)
-    if (isDraggingWaypointRef.current) {
-      void commitDraggedWaypoint()
-      return
-    }
-    setCanvasCursor('crosshair')
-  }, [commitDraggedWaypoint])
-
-  useEffect(() => {
-    if (!isDraggingWaypoint) return
-
-    const onMouseUp = () => {
-      void commitDraggedWaypoint()
-    }
-
-    window.addEventListener('mouseup', onMouseUp)
-    return () => window.removeEventListener('mouseup', onMouseUp)
-  }, [isDraggingWaypoint, commitDraggedWaypoint])
 
   const sendDispatchMessage = useCallback(async (rawMessage: string) => {
     const message = rawMessage.trim()
@@ -785,16 +578,6 @@ export default function DispatcherPage() {
               valueColor={(state.airSupply ?? 100) <= 25 ? '#ff3131' : (state.airSupply ?? 100) <= 50 ? '#eab308' : '#22c55e'} />
             <Stat label="CLEARED" value={`${(state.roomsCleared ?? []).length}`} />
           </div>
-          <Link href="/threejs-cloud" className="font-mono" style={{
-            textDecoration: 'none',
-            border: '1px solid #2a2a2a',
-            color: '#ff3131',
-            padding: '5px 9px',
-            fontSize: '8px',
-            letterSpacing: '0.1em',
-          }}>
-            THREE.JS CLOUD
-          </Link>
           <Link href="/" aria-label="Home" style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
             color: '#333', textDecoration: 'none', width: 28, height: 28,
@@ -849,7 +632,7 @@ export default function DispatcherPage() {
               flexShrink: 0,
             }}
           >
-            ACK
+            BACK
           </button>
         </div>
       )}
@@ -882,9 +665,7 @@ export default function DispatcherPage() {
                   key={feed.id}
                   feed={feed}
                   liveStream={liveStream}
-                  liveFeedError={liveFeedError}
                   isExpanded={expandedFeedId === feed.id}
-                  statusText={feed.id === 'FF1' ? state.firefighterStatus : undefined}
                   onToggleExpand={(id, seekTime) => {
                     setExpandedFeedId(id)
                     if (seekTime !== undefined) setExpandedFeedSeekTime(seekTime)
@@ -925,22 +706,7 @@ export default function DispatcherPage() {
           )}
         </div>
 
-        {/* Center: Map
-          ─────────────────────────────────────────────────────────────────
-          TODO: THREE.JS INTEGRATION
-          Replace the ThreeJsPlaceholder div below with your Three.js canvas.
-
-          Expected ROS topics (via ROSbridge ws://ROS_HOST:9090):
-            Point cloud : /odin1/cloud_slam   (sensor_msgs/PointCloud2)
-            FF position : /odin1/odometry     (nav_msgs/Odometry)
-            Path trail  : /odin1/path         (nav_msgs/Path)
-            Floor plan  : /slam_cloud_accumulator/map (sensor_msgs/PointCloud2)
-
-          The waypoint overlay canvas MUST remain on top (z-index: 1) so
-          dispatcher click-to-waypoint keeps working after you swap in Three.js.
-          Set your Three.js renderer's domElement to position:absolute, inset:0.
-          ─────────────────────────────────────────────────────────────────
-        */}
+        {/* Center: Map */}
         <div ref={mapContainerRef} className="panel" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           {/* ── Top: Live ROS Point Cloud ── */}
           <div className="panel-header" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
@@ -967,36 +733,17 @@ export default function DispatcherPage() {
                 {waypointMode ? '✓ WAYPOINT MODE' : 'WAYPOINT MODE'}
               </button>
               <span className="font-mono" style={{ fontSize: '8px', color: '#4d4d4d' }}>
-                {dragWaypoint
-                  ? 'DRAGGING WAYPOINT'
-                  : state.waypoint
-                    ? `WPT: (${Math.round(state.waypoint.x)}, ${Math.round(state.waypoint.y)})`
-                    : 'NO WAYPOINT'}
+                {state.waypoint
+                  ? `WPT: (${state.waypoint.x.toFixed(1)}, ${state.waypoint.y.toFixed(1)})`
+                  : 'NO WAYPOINT'}
               </span>
             </div>
           </div>
           <div style={{ flex: `${mapSplitPercent} 0 0%`, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
-            <RosPointCloud />
-
-            {/* Waypoint overlay canvas */}
-            <canvas
-              ref={canvasRef}
-              width={CW}
-              height={CH}
-              style={{
-                position: 'absolute', inset: 0,
-                width: '100%', height: '100%',
-                cursor: waypointMode ? (isDraggingWaypoint ? 'grabbing' : canvasCursor) : 'default',
-                display: 'block',
-                zIndex: 1,
-                background: 'transparent',
-                pointerEvents: waypointMode ? 'auto' : 'none', // Allow Three.js controls when not in waypoint mode
-              }}
-              onMouseDown={waypointMode ? handleCanvasMouseDown : undefined}
-              onMouseUp={waypointMode ? handleCanvasMouseUp : undefined}
-              onClick={waypointMode ? handleCanvasClick : undefined}
-              onMouseMove={waypointMode ? handleCanvasMove : undefined}
-              onMouseLeave={waypointMode ? handleCanvasLeave : undefined}
+            <RosPointCloud
+              waypoint={state.waypoint}
+              waypointMode={waypointMode}
+              onClickGround={handleGroundClick}
             />
           </div>
 
@@ -1452,9 +1199,7 @@ export default function DispatcherPage() {
             <FeedTile
               feed={expandedFeed}
               liveStream={liveStream}
-              liveFeedError={liveFeedError}
               isExpanded
-              statusText={expandedFeed.id === 'FF1' ? state.firefighterStatus : undefined}
               onToggleExpand={() => setExpandedFeedId(null)}
               lightbox
               initialSeekTime={expandedFeedSeekTime}
@@ -1522,18 +1267,14 @@ function ShrinkInIcon() {
 function FeedTile({
   feed,
   liveStream,
-  liveFeedError,
   isExpanded,
-  statusText,
   onToggleExpand,
   lightbox,
   initialSeekTime,
 }: {
   feed: CameraFeed
   liveStream: MediaStream | null
-  liveFeedError: string | null
   isExpanded: boolean
-  statusText?: string
   onToggleExpand: (id: string | null, seekTime?: number) => void
   lightbox?: boolean
   initialSeekTime?: number
@@ -1625,7 +1366,6 @@ function FeedTile({
         <FeedViewport
           feed={feed}
           liveStream={liveStream}
-          liveFeedError={liveFeedError}
           onReplayVideoRef={handleReplayVideoRef}
           initialSeekTime={initialSeekTime}
         />
@@ -1653,13 +1393,11 @@ function FeedTile({
 function FeedViewport({
   feed,
   liveStream,
-  liveFeedError,
   onReplayVideoRef,
   initialSeekTime,
 }: {
   feed: CameraFeed
   liveStream: MediaStream | null
-  liveFeedError: string | null
   onReplayVideoRef?: (el: HTMLVideoElement | null) => void
   initialSeekTime?: number
 }) {

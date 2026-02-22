@@ -368,10 +368,17 @@ export async function POST(request: Request) {
 
   try {
     let agentResponse: AgentResponse
+    let executionMode: 'model' | 'fallback' = 'fallback'
+    let fallbackReason = ''
 
     if (!CEREBRAS_API_KEY) {
+      executionMode = 'fallback'
+      fallbackReason = 'missing_cerebras_api_key'
+      console.info(`[NIGEL Agent] mode=${executionMode} trigger=${trigger} reason=${fallbackReason}`)
       agentResponse = buildFallbackResponse(trigger, message, newStatus, state)
     } else {
+      executionMode = 'model'
+      console.info(`[NIGEL Agent] mode=${executionMode} trigger=${trigger} provider=cerebras model=${MODEL}`)
       const systemPrompt = buildSystemPrompt(state as unknown as Record<string, unknown>)
 
       let userMessage = ''
@@ -391,7 +398,13 @@ export async function POST(request: Request) {
 
       try {
         agentResponse = await callCerebras(systemPrompt, userMessage)
-      } catch {
+      } catch (err) {
+        executionMode = 'fallback'
+        fallbackReason = 'cerebras_request_failed'
+        console.warn(
+          `[NIGEL Agent] mode=${executionMode} trigger=${trigger} reason=${fallbackReason}`,
+          err,
+        )
         agentResponse = buildFallbackResponse(trigger, message, newStatus, state)
       }
     }
@@ -411,6 +424,10 @@ export async function POST(request: Request) {
       })
       trimRadioLog(state)
     }
+
+    console.info(
+      `[NIGEL Agent] complete mode=${executionMode} trigger=${trigger} severity=${agentResponse.severity} actions=${agentResponse.actions?.length ?? 0} shouldSpeak=${agentResponse.shouldSpeak}`,
+    )
 
     return NextResponse.json({
       ok: true,

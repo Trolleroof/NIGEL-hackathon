@@ -2,15 +2,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import Link from 'next/link'
 import ThreeScene from '@/components/three-scene'
-
-// ─── Constants ───────────────────────────────────────────────────────
-const STEP = 10
-const BOUNDS = { xMin: 82, xMax: 818, yMin: 52, yMax: 448 }
-const CW = 900   // logical canvas width (matches dispatcher)
-const CH = 500   // logical canvas height
+import type { OdometryData } from '@/lib/websocket-manager'
 
 const STATUSES = ['OK', 'Searching', 'Victim Found', 'Need Help'] as const
 type StatusType = typeof STATUSES[number]
+const METERS_TO_FEET = 3.28084
+const TARGET_RADIUS_FEET = 5
 
 function statusColor(s: StatusType) {
   if (s === 'OK') return '#22c55e'
@@ -32,90 +29,6 @@ function fireAgent(trigger: 'radio_message' | 'heartbeat' | 'status_change', mes
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ trigger, message, newStatus }),
   }).catch(() => {})
-}
-
-// ─── Mini-map canvas draw ─────────────────────────────────────────────
-// Simple walls for the mini-map (same logical coords as dispatcher)
-const WALLS: [number, number, number, number][] = [
-  [80, 50, 820, 50], [80, 50, 80, 450], [820, 50, 820, 450],
-  [80, 450, 405, 450], [465, 450, 820, 450],
-  [290, 50, 290, 135], [290, 180, 290, 210],
-  [530, 50, 530, 135], [530, 180, 530, 210],
-  [80, 210, 170, 210], [230, 210, 400, 210], [460, 210, 580, 210],
-  [80, 340, 370, 340], [435, 340, 820, 340],
-]
-
-function drawMiniMap(
-  ctx: CanvasRenderingContext2D,
-  ffPos: { x: number; y: number },
-  waypoint: { x: number; y: number } | null,
-  breadcrumbs: { x: number; y: number }[],
-  tick: number,
-) {
-  ctx.clearRect(0, 0, CW, CH)
-
-  // Dim layer to keep overlay readable above live point cloud
-  ctx.fillStyle = 'rgba(6,6,6,0.5)'
-  ctx.fillRect(0, 0, CW, CH)
-
-  // Grid
-  ctx.fillStyle = 'rgba(120,120,120,0.25)'
-  for (let x = 0; x < CW; x += 30) {
-    for (let y = 0; y < CH; y += 30) {
-      ctx.fillRect(x, y, 1, 1)
-    }
-  }
-
-  // Floor
-  ctx.fillStyle = 'rgba(0,0,0,0.26)'
-  ctx.fillRect(81, 51, 738, 398)
-
-  // Walls
-  ctx.strokeStyle = 'rgba(163,33,33,0.85)'
-  ctx.lineWidth = 2
-  ctx.lineCap = 'square'
-  for (const [x1, y1, x2, y2] of WALLS) {
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke()
-  }
-
-  // Breadcrumbs
-  for (let i = 0; i < breadcrumbs.length; i++) {
-    const alpha = (i / breadcrumbs.length) * 0.5
-    ctx.fillStyle = `rgba(255,49,49,${alpha})`
-    ctx.beginPath(); ctx.arc(breadcrumbs[i].x, breadcrumbs[i].y, 2, 0, Math.PI * 2); ctx.fill()
-  }
-
-  // Waypoint
-  if (waypoint) {
-    const pulse = 0.6 + 0.4 * Math.sin(tick * 0.1)
-    const s = 14
-    ctx.strokeStyle = `rgba(255,49,49,${pulse})`
-    ctx.lineWidth = 1.5
-    ctx.beginPath(); ctx.moveTo(waypoint.x - s, waypoint.y); ctx.lineTo(waypoint.x + s, waypoint.y); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(waypoint.x, waypoint.y - s); ctx.lineTo(waypoint.x, waypoint.y + s); ctx.stroke()
-    ctx.beginPath(); ctx.arc(waypoint.x, waypoint.y, 6, 0, Math.PI * 2); ctx.stroke()
-    // line from FF to waypoint
-    ctx.strokeStyle = `rgba(255,49,49,0.15)`
-    ctx.lineWidth = 1
-    ctx.setLineDash([8, 8])
-    ctx.beginPath(); ctx.moveTo(ffPos.x, ffPos.y); ctx.lineTo(waypoint.x, waypoint.y); ctx.stroke()
-    ctx.setLineDash([])
-  }
-
-  // FF dot
-  const glow = 0.7 + 0.3 * Math.sin(tick * 0.06)
-  ctx.shadowColor = '#ff3131'
-  ctx.shadowBlur = 14 * glow
-  ctx.fillStyle = '#ff3131'
-  ctx.beginPath(); ctx.arc(ffPos.x, ffPos.y, 8, 0, Math.PI * 2); ctx.fill()
-  ctx.shadowBlur = 0
-  ctx.strokeStyle = 'rgba(255,49,49,0.35)'
-  ctx.lineWidth = 1
-  ctx.beginPath(); ctx.arc(ffPos.x, ffPos.y, 14, 0, Math.PI * 2); ctx.stroke()
-  ctx.fillStyle = '#fff'
-  ctx.font = 'bold 10px "Space Mono", monospace'
-  ctx.textAlign = 'left'
-  ctx.fillText('YOU', ffPos.x + 16, ffPos.y + 4)
 }
 
 // ─── Arrow SVG ────────────────────────────────────────────────────────
@@ -169,35 +82,21 @@ function CamThumb() {
 interface Msg { id: number; from: string; message: string; timestamp: string; shouldSpeak?: boolean }
 
 export default function FirefighterPage() {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const [ffPos, setFfPos] = useState({ x: 435, y: 400 })
   const [waypoint, setWaypoint] = useState<{ x: number; y: number } | null>(null)
-  const [breadcrumbs, setBreadcrumbs] = useState<{ x: number; y: number }[]>([])
   const [status, setStatus] = useState<StatusType>('OK')
   const [radioLog, setRadioLog] = useState<Msg[]>([])
   const [transmitting, setTransmitting] = useState(false)
-  const [lastMsg, setLastMsg] = useState('')
-  const [tick, setTick] = useState(0)
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const ffPosRef = useRef(ffPos)
+  const lastPositionPostAtRef = useRef(0)
+  const lastPostedPosRef = useRef<{ x: number; y: number } | null>(null)
 
   // ── Speech-to-Text refs ──
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null)
   const finalTranscriptRef = useRef('')
   const [interimText, setInterimText] = useState('')
-  const [finalTranscriptText, setFinalTranscriptText] = useState('')
-
-  useEffect(() => {
-    ffPosRef.current = ffPos
-  }, [ffPos])
-
-  // Tick for animations
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 80)
-    return () => clearInterval(id)
-  }, [])
 
   // Poll state
   useEffect(() => {
@@ -207,7 +106,6 @@ export default function FirefighterPage() {
         const data = await res.json()
         setWaypoint(data.waypoint)
         setFfPos(data.firefighterPosition)
-        setBreadcrumbs(data.breadcrumbs ?? [])
         setStatus(data.firefighterStatus)
         setRadioLog(data.radioLog ?? [])
       } catch { /* ignore */ }
@@ -238,44 +136,6 @@ export default function FirefighterPage() {
     })()
   }, [radioLog])
 
-  // Draw mini-map
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    drawMiniMap(ctx, ffPos, waypoint, breadcrumbs, tick)
-  }, [ffPos, waypoint, breadcrumbs, tick])
-
-  // Keyboard movement
-  useEffect(() => {
-    const pressed = new Set<string>()
-    const onKeyDown = (e: KeyboardEvent) => {
-      pressed.add(e.key)
-      let dx = 0, dy = 0
-      if (pressed.has('ArrowUp') || pressed.has('w') || pressed.has('W')) dy -= STEP
-      if (pressed.has('ArrowDown') || pressed.has('s') || pressed.has('S')) dy += STEP
-      if (pressed.has('ArrowLeft') || pressed.has('a') || pressed.has('A')) dx -= STEP
-      if (pressed.has('ArrowRight') || pressed.has('d') || pressed.has('D')) dx += STEP
-      if (dx !== 0 || dy !== 0) {
-        const cur = ffPosRef.current
-        const newPos = {
-          x: Math.max(BOUNDS.xMin, Math.min(BOUNDS.xMax, cur.x + dx)),
-          y: Math.max(BOUNDS.yMin, Math.min(BOUNDS.yMax, cur.y + dy)),
-        }
-        setFfPos(newPos)
-        fetch('/api/state', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: 'firefighter_position_update', position: newPos }),
-        }).catch(() => { })
-      }
-    }
-    const onKeyUp = (e: KeyboardEvent) => pressed.delete(e.key)
-    window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('keyup', onKeyUp)
-    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp) }
-  }, [])
-
   // Status cycle
   const cycleStatus = useCallback(async () => {
     const next = STATUSES[(STATUSES.indexOf(status) + 1) % STATUSES.length]
@@ -292,16 +152,12 @@ export default function FirefighterPage() {
     setTransmitting(true)
     setInterimText('')
     finalTranscriptRef.current = ''
-    setFinalTranscriptText('')
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const w = window as any
     const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition
     if (!SpeechRecognitionAPI) {
       // Fallback: just show transmitting indicator
-      holdTimer.current = setTimeout(() => {
-        setLastMsg('TRANSMITTING...')
-      }, 200)
       return
     }
 
@@ -323,13 +179,15 @@ export default function FirefighterPage() {
         }
       }
       finalTranscriptRef.current = final
-      setFinalTranscriptText(final)
       setInterimText(interim)
-      setLastMsg(final + interim || 'LISTENING...')
     }
 
-    recognition.onerror = () => {
+    recognition.onerror = (event: { error?: string }) => {
       setTransmitting(false)
+      const isSecureContext = window.location.protocol === 'https:' || window.location.hostname === 'localhost'
+      if (!isSecureContext && event.error === 'not-allowed') {
+        console.warn('[Speech] Microphone access requires HTTPS. Use https:// instead of http://')
+      }
     }
 
     recognitionRef.current = recognition
@@ -353,31 +211,47 @@ export default function FirefighterPage() {
 
     const transcript = (finalTranscriptRef.current || interimText).trim()
     setInterimText('')
-    setFinalTranscriptText('')
 
     if (transcript && transcript !== 'LISTENING...' && transcript !== 'TRANSMITTING...') {
-      setLastMsg(transcript)
       await fetch('/api/state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'firefighter_voice_message', message: `[VOICE] ${transcript}` }),
       })
       fireAgent('radio_message', transcript)
-    } else {
-      setLastMsg('')
     }
-
-    setTimeout(() => setLastMsg(''), 4000)
   }, [transmitting, interimText])
+
+  const handleOdometry = useCallback((odom: OdometryData) => {
+    // ODOM is metres in ROS space (x, y, z); UI map uses x,z plane.
+    const currentPos = { x: odom.x, y: odom.z }
+    setFfPos(currentPos)
+
+    const now = Date.now()
+    const last = lastPostedPosRef.current
+    const movedEnough = !last || Math.hypot(currentPos.x - last.x, currentPos.y - last.y) >= 0.1
+    const due = now - lastPositionPostAtRef.current >= 250
+    if (!movedEnough || !due) return
+
+    lastPositionPostAtRef.current = now
+    lastPostedPosRef.current = currentPos
+
+    fetch('/api/state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'firefighter_position_update', position: currentPos }),
+    }).catch(() => { })
+  }, [])
 
   // Arrow angle + distance
   const angle = waypoint
     ? Math.atan2(waypoint.y - ffPos.y, waypoint.x - ffPos.x) * (180 / Math.PI) + 90
     : 0
-  const dist = waypoint
-    ? (Math.sqrt((waypoint.x - ffPos.x) ** 2 + (waypoint.y - ffPos.y) ** 2) * 0.055).toFixed(1)
+  const distFeet = waypoint
+    ? Math.hypot(waypoint.x - ffPos.x, waypoint.y - ffPos.y) * METERS_TO_FEET
     : null
-  const onTarget = waypoint && parseFloat(dist ?? '99') < 1.5
+  const distFeetLabel = distFeet !== null ? distFeet.toFixed(1) : null
+  const onTarget = waypoint !== null && distFeet !== null && distFeet <= TARGET_RADIUS_FEET
   const isNeedHelp = status === 'Need Help'
 
   return (
@@ -445,22 +319,9 @@ export default function FirefighterPage() {
         </div>
       )}
 
-      {/* ── Mini-map ── */}
+      {/* ── Map ── */}
       <div style={{ flex: 4, position: 'relative', overflow: 'hidden', minHeight: 0 }}>
-        <ThreeScene showOverlay={false} />
-        <canvas
-          ref={canvasRef}
-          width={CW}
-          height={CH}
-          style={{
-            position: 'absolute',
-            inset: 0,
-            width: '100%',
-            height: '100%',
-            display: 'block',
-            background: 'transparent',
-          }}
-        />
+        <ThreeScene showOverlay={false} waypoint={waypoint} onOdometry={handleOdometry} />
         {/* On-target overlay */}
         {onTarget && (
           <div style={{
@@ -475,15 +336,23 @@ export default function FirefighterPage() {
             }}>ON TARGET</span>
           </div>
         )}
-        {/* Map label */}
+        {/* FF position indicator */}
         <div style={{
-          position: 'absolute', top: '8px', right: '10px',
-          display: 'flex', alignItems: 'center', gap: '4px',
+          position: 'absolute', bottom: '10px', left: '50%', transform: 'translateX(-50%)',
+          display: 'flex', alignItems: 'center', gap: '6px',
+          pointerEvents: 'none',
         }}>
-          <span className="font-mono" style={{ fontSize: '8px', color: '#555', letterSpacing: '0.1em' }}>
-            FLOOR MAP
+          <div style={{
+            width: '10px', height: '10px', borderRadius: '50%',
+            background: '#ff3131', boxShadow: '0 0 10px #ff3131',
+            animation: 'pulse-dot 1.5s infinite',
+          }} />
+          <span className="font-mono" style={{ fontSize: '9px', color: '#ff3131', letterSpacing: '0.1em' }}>
+            YOU — ({Math.round(ffPos.x)}, {Math.round(ffPos.y)})
           </span>
         </div>
+        {/* Map label */}
+        
       </div>
 
       {/* ── Direction strip ── */}
@@ -501,32 +370,18 @@ export default function FirefighterPage() {
                 fontSize: '36px', fontWeight: 700, color: '#fff',
                 letterSpacing: '0.03em', lineHeight: 1,
               }}>
-                {dist}<span style={{ fontSize: '16px', color: '#666', marginLeft: '3px' }}>m</span>
+                {distFeetLabel}<span style={{ fontSize: '16px', color: '#666', marginLeft: '3px' }}>ft</span>
               </div>
               <div className="font-mono" style={{ fontSize: '9px', color: '#777', letterSpacing: '0.15em', marginTop: '2px' }}>
                 TO TARGET
               </div>
-              {lastMsg && (
-                <div className="font-mono anim-in" style={{
-                  fontSize: '9px', color: '#ff3131', marginTop: '6px',
-                  maxWidth: '160px', lineHeight: 1.4,
-                }}>
-                  {lastMsg}
-                </div>
-              )}
             </div>
           </>
         ) : (
           <div style={{ textAlign: 'center' }}>
-            {lastMsg ? (
-              <div className="font-mono anim-in" style={{ fontSize: '10px', color: '#ff3131', letterSpacing: '0.05em' }}>
-                {lastMsg}
-              </div>
-            ) : (
-              <div className="font-mono" style={{ fontSize: '10px', color: '#555', letterSpacing: '0.2em' }}>
-                {onTarget ? 'ON TARGET' : 'STANDBY — AWAITING WAYPOINT'}
-              </div>
-            )}
+            <div className="font-mono" style={{ fontSize: '10px', color: '#555', letterSpacing: '0.2em' }}>
+              {onTarget ? 'ON TARGET' : 'STANDBY — AWAITING WAYPOINT'}
+            </div>
           </div>
         )}
       </div>
@@ -614,15 +469,6 @@ export default function FirefighterPage() {
             {transmitting ? 'TX' : 'TRANSMIT'}
           </div>
           <div className="font-mono" style={{ fontSize: '7px', color: '#666', letterSpacing: '0.08em' }}>HOLD TO TALK</div>
-          {transmitting && (interimText || finalTranscriptText) && (
-            <div className="font-mono" style={{
-              fontSize: '8px', color: '#ff3131', maxWidth: '140px',
-              textAlign: 'center', marginTop: '4px',
-              fontStyle: 'italic', opacity: 0.8,
-            }}>
-              {finalTranscriptText}{interimText}
-            </div>
-          )}
         </button>
       </div>
     </div>
