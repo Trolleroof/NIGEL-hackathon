@@ -1,10 +1,10 @@
 # NIGEL
 
-**Navigation, Incident Guidance, and Emergency Localization & Control** — a mission-control style interface for the Future Interfaces hackathon. It turns VSLAM (visual mapping) data and radio-style audio into a live 3D tactical view so dispatch can see where units are and what they’re reporting.
+**Navigation, Incident Guidance, and Emergency Localization & Control** — a mission-control style interface for the Future Interfaces hackathon. It turns VSLAM (visual mapping) data and radio-style transcripts into a unified command center.
 
 Think of it as **air traffic control, but for firefighters on a floor plan**: multiple video feeds, a growing 3D map from the helmet rig, and a radio panel that can drive what you see on the map.
 
-## What’s in this repo
+## What's in this repo
 
 | Path | Role |
 |------|------|
@@ -16,7 +16,7 @@ Think of it as **air traffic control, but for firefighters on a floor plan**: mu
 
 - **Dispatcher** (`/dispatcher`) — multi-unit viewports, central 3D map, blueprint search, radio / transcript UX  
 - **Firefighter** (`/firefighter`) — field-facing UI  
-- **WebSockets** — live SLAM / camera data; see [`frontend/docs/WEBSOCKET_ARCHITECTURE.md`](frontend/docs/WEBSOCKET_ARCHITECTURE.md) and [`ros2/src/slam_cloud_accumulator/WEBSOCKET_API.md`](ros2/src/slam_cloud_accumulator/WEBSOCKET_API.md)
+- **WebSockets** — live SLAM / camera data; see [`frontend/docs/WEBSOCKET_ARCHITECTURE.md`](frontend/docs/WEBSOCKET_ARCHITECTURE.md) and [`ros2/src/slam_cloud_accumulator/WEBSOCKET_API.md`](ros2/src/slam_cloud_accumulator/WEBSOCKET_API.md) for architecture details
 
 ### ROS 2 packages
 
@@ -26,7 +26,7 @@ Think of it as **air traffic control, but for firefighters on a floor plan**: mu
 ## Prerequisites
 
 - **Node.js** 20+ (matches frontend tooling)  
-- **ROS 2** (Jazzy or your team’s distro) for the `ros2/` workspace  
+- **ROS 2** (Jazzy or your team's distro) for the `ros2/` workspace  
 - Optional: TLS certs under `frontend/certificates/` for HTTPS dev (otherwise the dev server falls back to HTTP — see `frontend/server.js`)
 
 ## Quick start — web UI
